@@ -1,0 +1,29 @@
+# Core scientific stack
+numpy>=1.25
+pandas>=2.0
+scipy>=1.11
+matplotlib>=3.8
+networkx>=3.1
+
+# Power system modeling
+pypsa>=0.27.0
+
+# Co-simulation framework
+mosaik>=3.0.1
+mosaik-api>=3.0.0
+
+# Optional: optimization (PyPSA uses Pyomo; GLPK must be installed via system)
+pyomo>=6.7
+
+# Optional: visualization / maps
+geopandas>=0.14
+shapely>=2.0
+
+# Optional: utilities
+PyYAML>=6.0
+tqdm
+seaborn
+
+# Development / interactive use
+ipykernel
+jupyter

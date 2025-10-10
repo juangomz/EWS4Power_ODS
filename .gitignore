@@ -1,0 +1,32 @@
+# === Python ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+
+# === Entornos virtuales ===
+venv/
+env/
+tfm_env/
+.mosaik/
+.eggs/
+*.egg-info/
+
+# === Datos y simulaciones ===
+data/
+*.csv
+*.nc
+*.h5
+*.zip
+*.tar
+*.gz
+results/
+output/
+logs/
+
+# === IDE y sistema ===
+.vscode/
+.idea/
+.DS_Store
+*.log
