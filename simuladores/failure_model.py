@@ -9,7 +9,7 @@ META = {
         'FailureModel': {
             'public': True,
             'params': ['line_positions'],  # ✅ ahora sí lo acepta
-            'attrs': ['wind_speed', 'line_status', 'wind_shape', 'grid_x', 'grid_y'],
+            'attrs': ['wind_speed', 'line_status', 'wind_shape', 'grid_lon', 'grid_lat'],
         },
     },
 }
@@ -20,8 +20,8 @@ class FailureModel(mosaik_api.Simulator):
         super().__init__(META)
         self.entities = {}  # Guardar estado de cada entidad
         self.wind_speed = 0
-        self.grid_x = None
-        self.grid_y = None
+        self.grid_lon = None
+        self.grid_lat = None
         self.wind_field = None
         self.wind_shape = None
         self.time = 0
@@ -48,7 +48,7 @@ class FailureModel(mosaik_api.Simulator):
     # ============================================================
     # Interpolación bilineal simple
     def interp2_bilinear(self, x, y):
-        gx, gy, f = self.grid_x, self.grid_y, self.wind_field
+        gx, gy, f = self.grid_lon, self.grid_lat, self.wind_field
         ny, nx = f.shape
 
         # limitar coordenadas dentro de la malla
@@ -103,10 +103,10 @@ class FailureModel(mosaik_api.Simulator):
                         self.wind_field = self.wind_field.reshape(self.wind_shape)
             if 'line_positions' in vals:
                 self.line_positions = list(vals['line_positions'].values())[0]
-            if 'grid_x' in vals:
-                self.grid_x = np.array(list(vals['grid_x'].values())[0])
-            if 'grid_y' in vals:
-                self.grid_y = np.array(list(vals['grid_y'].values())[0])
+            if 'grid_lon' in vals:
+                self.grid_lon = np.array(list(vals['grid_lon'].values())[0])
+            if 'grid_lat' in vals:
+                self.grid_lat = np.array(list(vals['grid_lat'].values())[0])
             if 'wind_shape' in vals:
                 self.wind_shape = tuple(list(vals['wind_shape'].values())[0])
 
@@ -122,7 +122,7 @@ class FailureModel(mosaik_api.Simulator):
                     status, mean_v = self.compute_failure(lp['x0'], lp['y0'], lp['x1'], lp['y1'])
                     state['line_status'] = status
                     state['wind_speed'] = mean_v
-                    print(f"[t={time/3600:.0f}h] {lid}: mean_v={mean_v:.1f} → line={status}")
+                    # print(f"[t={time/3600:.0f}h] {lid}: mean_v={mean_v:.1f} → line={status}")
         else:
             print(f"[t={time/3600:.0f}h] ⚠️ No hay datos de viento o posiciones.")
 
@@ -137,6 +137,6 @@ class FailureModel(mosaik_api.Simulator):
                     'line_status': self.entities[eid]['line_status'],
                     'wind_speed': self.entities[eid]['wind_speed'],
                 }
-        print("📤 get_data() →", data)
+        # print("📤 get_data() →", data)
         return data
 

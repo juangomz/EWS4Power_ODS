@@ -33,7 +33,7 @@ def main():
     # --- Conexiones ---
     # 1️⃣ El viento alimenta a todos los modelos de fallo
     for f in failures:
-        world.connect(w, f, 'wind_speed', 'grid_x', 'grid_y', 'wind_shape')
+        world.connect(w, f, 'wind_speed', 'grid_lon', 'grid_lat', 'wind_shape')
 
     
     # 2️⃣ Cada modelo de fallo controla la red
