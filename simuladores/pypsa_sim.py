@@ -7,6 +7,15 @@ import matplotlib.pyplot as plt
 import networkx
 import numpy as np
 
+import logging
+# 🔇 Silenciar mensajes INFO de PyPSA
+logging.getLogger("pypsa").setLevel(logging.WARNING)
+
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="pypsa")
+
+data_dir = './data/red_electrica'
+
 META = {
     'api_version': '3.0',
     'type': 'time-based',
@@ -33,38 +42,74 @@ class PyPSASim(mosaik_api.Simulator):
         n = self.network
         n.set_snapshots(["now"])
         
-         # Coordenadas (x,y) en km o grados
-        bus_positions = {
-            "bus0": (2.0, 2.0),
-            "bus1": (4.0, 6.0),
-            "bus2": (6.0, 1.0),
-        }
+        # --- 1️⃣ Leer CSVs ---
+        buses_path = os.path.join(data_dir, "buses.csv")
+        lines_path = os.path.join(data_dir, "lines.csv")
+        loads_path = os.path.join(data_dir, "loads.csv")
+        gens_path = os.path.join(data_dir, "generators.csv")
 
-        for bus, pos in bus_positions.items():
-            n.add("Bus", bus, v_nom=0.4)
-            n.buses.at[bus, "x"] = pos[0]
-            n.buses.at[bus, "y"] = pos[1]
+        buses = pd.read_csv(buses_path)
+        lines = pd.read_csv(lines_path)
+        loads = pd.read_csv(loads_path)
+        gens = pd.read_csv(gens_path)
 
-        line_data = {
-            "L1": {"bus0": "bus0", "bus1": "bus1", "x": 0.01, "r": 0.02, "s_nom": 5},
-            "L2": {"bus0": "bus1", "bus1": "bus2", "x": 0.015, "r": 0.025, "s_nom": 5},
-            "L3": {"bus0": "bus0", "bus1": "bus2", "x": 0.02, "r": 0.03, "s_nom": 5},
-        }
+        
+        # --- 2️⃣ Añadir Buses ---
+        for _, row in buses.iterrows():
+            bus_id = str(row["bus"])
+            n.add("Bus",
+                bus_id,
+                v_nom=float(row.get("v_nom_kv", 20)),
+                carrier="AC")
+            n.buses.at[bus_id, "x"] = float(row["x"])
+            n.buses.at[bus_id, "y"] = float(row["y"])
 
-        for lid, vals in line_data.items():
-            n.add("Line", lid, bus0=vals["bus0"], bus1=vals["bus1"],
-                x=vals["x"], r=vals["r"], s_nom=vals["s_nom"])
+        # --- 3️⃣ Añadir Líneas ---
+        line_data = {}
+        for _, row in lines.iterrows():
+            lid = str(row["line"])
+            bus0, bus1 = str(row["bus0"]), str(row["bus1"])
+            r = float(row.get("r_ohm", 0.1)) * float(row.get("length_km", 1.0))
+            x = float(row.get("x_ohm", 0.3)) * float(row.get("length_km", 1.0))
+            s_nom = float(row.get("s_max_mva", 10.0))
 
+            n.add("Line", lid, bus0=bus0, bus1=bus1, r=r, x=x, s_nom=s_nom)
+            line_data[lid] = {"bus0": bus0, "bus1": bus1, "r": r, "x": x, "s_nom": s_nom}
+
+        # --- 4️⃣ Añadir Cargas ---
+        for _, row in loads.iterrows():
+            n.add("Load", str(row["load"]),
+                bus=str(row["bus"]),
+                p_set=float(row["p_set_mw"]),
+                q_set=float(row.get("q_set_mvar", 0.0)))
+
+        # --- 5️⃣ Añadir Generadores ---
+        for _, row in gens.iterrows():
+            n.add("Generator", str(row["gen"]),
+                bus=str(row["bus"]),
+                p_nom=float(row["p_nom_mw"]),
+                control=row.get("control", "PQ"))
+            
+        # --- 6️⃣ Normalizar índices en PyPSA ---
+        n.buses.index = n.buses.index.astype(str)
+        n.lines.index = n.lines.index.astype(str)
+        n.loads.index = n.loads.index.astype(str)
+        n.generators.index = n.generators.index.astype(str)
+            
+        # ✅ Forzar carrier AC en caso de buses sin definir
+        n.buses["carrier"] = "AC"
+
+        # Guardamos la referencia local de líneas
         self.lines = line_data
 
-        n.add("Generator", "gen1", bus="bus0", p_nom=10.0, type="slack")
-        n.add("Load", "load1", bus="bus2", p_set=0.5, q_set=0.15)
+        print(f"✅ Red cargada desde {data_dir}: "
+            f"{len(buses)} buses, {len(lines)} líneas, {len(loads)} cargas, {len(gens)} generadores.")
 
-        # 💾 Inicializar estado actual (para get_data)
+        # Inicializar estado actual
         self.current = {
             'ens': 0.0,
-            'num_lines': len(self.network.lines),
-            'currents': {lid: 0.0 for lid in self.network.lines.index}
+            'num_lines': len(n.lines),
+            'currents': {lid: 0.0 for lid in n.lines.index}
         }
 
     def init(self, sid, **sim_params):
@@ -81,7 +126,7 @@ class PyPSASim(mosaik_api.Simulator):
             for i, lid in enumerate(self.lines.keys())
         }
 
-        print("🔗 failure_map generado automáticamente:", self.failure_map)
+        # print("🔗 failure_map generado automáticamente:", self.failure_map)
     
         # 💾 Inicializar current aquí mismo
         self.current = {
@@ -114,13 +159,13 @@ class PyPSASim(mosaik_api.Simulator):
                 line_status_inputs = vals['line_status']
 
         # print(f"🌬️  Wind speed = {wind_speed:.2f} m/s")
-        print(f"⚡ Raw line_status input = {line_status_inputs}")
+        # print(f"⚡ Raw line_status input = {line_status_inputs}")
 
         # Generar el failure_map automáticamente si aún no existe
         if not self.failure_map and self.lines:
             self.failure_map = {f"FailureModel-{i}.FailureProc": lid
                                 for i, lid in enumerate(self.lines.keys())}
-            print("🔗 failure_map generado automáticamente:", self.failure_map)
+            # print("🔗 failure_map generado automáticamente:", self.failure_map)
 
         # --- 2️⃣ Traducir a líneas reales ---
         if not hasattr(self, "line_status_memory"):
@@ -136,18 +181,18 @@ class PyPSASim(mosaik_api.Simulator):
                 print(f"⚠️  {src_id} no tiene mapeo definido, ignorado")
 
 
-        print(f"🔀 Estado interpretado de líneas = {self.line_status_memory}")
+        # print(f"🔀 Estado interpretado de líneas = {self.line_status_memory}")
 
         # --- 3️⃣ Actualizar red ---
         for lid, status in self.line_status_memory.items():
             if status == 0:
                 if lid in self.network.lines.index:
-                    print(f"❌ Eliminando línea {lid}")
+                    # print(f"❌ Eliminando línea {lid}")
                     self.network.remove("Line", lid)
             else:
                 if lid not in self.network.lines.index and lid in self.lines:
                     params = self.lines[lid]
-                    print(f"✅ Restaurando línea {lid}")
+                    # print(f"✅ Restaurando línea {lid}")
                     self.network.add("Line", lid,
                                     bus0=params["bus0"],
                                     bus1=params["bus1"],
@@ -176,23 +221,32 @@ class PyPSASim(mosaik_api.Simulator):
 
         import networkx as nx
 
-        # --- 5️⃣ Calcular ENS ---
-        expected_load = abs(self.network.loads.at['load1', 'p_set'])
+        # --- 5️⃣ Calcular ENS (Energy Not Supplied) de forma general ---
+        G = self.network.graph()
+
+        # Suma total esperada de carga (MW)
+        expected_load = abs(self.network.loads["p_set"]).sum()
         actual_load = 0.0
 
-        G = self.network.graph()
-        connected = nx.has_path(G, "bus0", "bus2")
+        # Buscar todos los generadores conectados y sus buses
+        gen_buses = set(self.network.generators["bus"])
 
-        if connected:
-            try:
-                actual_load = abs(self.network.loads_t.p['load1'].iloc[0])
-            except (KeyError, IndexError):
-                actual_load = 0.0
-            ens = max(0.0, expected_load - actual_load)
-            print(f"🔗 Buses conectados → flujo activo = {actual_load:.2f}")
-        else:
-            ens = expected_load
-            print("🚫 Buses desconectados → toda la carga se considera no servida")
+        # Iterar sobre cada carga
+        for load_id, load_row in self.network.loads.iterrows():
+            bus = load_row["bus"]
+
+            # Si hay al menos un camino desde esta carga a algún generador → está alimentada
+            connected = any(nx.has_path(G, bus, gen_bus) for gen_bus in gen_buses if bus in G and gen_bus in G)
+
+            if connected:
+                # Si la red está conectada, la potencia servida es igual a la programada
+                actual_load += abs(load_row["p_set"])
+            else:
+                # Si está aislada, se considera no servida
+                pass
+
+        # ENS = potencia esperada - potencia realmente servida
+        ens = max(0.0, expected_load - actual_load)
 
         print(f"📊 Expected load = {expected_load:.2f}, ENS = {ens:.2f}")
         print("guardando plots...")
@@ -252,33 +306,51 @@ class PyPSASim(mosaik_api.Simulator):
 
 
     def plot_network(self, hour, line_status):
-        """Dibuja el estado actual de la red sobre el mapa de viento."""
+        """Dibuja el estado actual de la red sobre el mapa de viento (en lon/lat reales)."""
+        import networkx as nx
         G = self.network.graph()
 
-        # ✅ Posiciones fijas (geométricas)
+        # --- 1️⃣ Posiciones de buses (lon/lat reales) ---
         pos = {
             bus: (
-                float(self.network.buses.at[bus, "x"]),
-                float(self.network.buses.at[bus, "y"])
+                float(self.network.buses.at[bus, "x"]),  # lon
+                float(self.network.buses.at[bus, "y"])   # lat
             )
             for bus in self.network.buses.index
         }
 
-        plt.figure(figsize=(6, 5))
+        plt.figure(figsize=(8, 6))
 
-        # === 🌀 Dibujar mapa de viento (si existe) ===
+        # --- 2️⃣ Dibujar mapa de viento en coordenadas reales ---
         if hasattr(self, "last_wind_field") and isinstance(self.last_wind_field, np.ndarray):
-            # Crear un eje de coordenadas consistente con el grid del viento
             ny, nx = self.last_wind_field.shape
-            extent = [0, nx - 1, 0, ny - 1]  # ajusta a tus coordenadas reales si las tienes
-            plt.imshow(self.last_wind_field, origin='lower', cmap='coolwarm', alpha=0.6, extent=extent)
+
+            # Obtener límites reales desde WindSim2D (lat/lon)
+            if hasattr(self, "wind_grid_lon") and hasattr(self, "wind_grid_lat"):
+                lon_min, lon_max = min(self.wind_grid_lon), max(self.wind_grid_lon)
+                lat_min, lat_max = min(self.wind_grid_lat), max(self.wind_grid_lat)
+            else:
+                # fallback si no los tienes almacenados
+                lon_min, lon_max = min(v[0] for v in pos.values()), max(v[0] for v in pos.values())
+                lat_min, lat_max = min(v[1] for v in pos.values()), max(v[1] for v in pos.values())
+
+            extent = [lon_min, lon_max, lat_min, lat_max]
+
+            plt.imshow(
+                self.last_wind_field,
+                origin='lower',
+                cmap='coolwarm',
+                alpha=0.6,
+                extent=extent,
+                aspect='auto'
+            )
             plt.colorbar(label='Wind speed [m/s]', shrink=0.7)
         else:
             print("⚠️  No hay campo de viento disponible para graficar.")
 
-        # === ⚡ Dibujar red ===
-        networkx.draw_networkx_nodes(G, pos, node_color='skyblue', node_size=800, edgecolors='black')
-        networkx.draw_networkx_labels(G, pos, font_weight='bold')
+        # --- 3️⃣ Dibujar red ---
+        networkx.draw_networkx_nodes(G, pos, node_color='skyblue', node_size=2, edgecolors='black')
+        # networkx.draw_networkx_labels(G, pos, font_size=8, font_weight='bold')
 
         active_edges, down_edges = [], []
         for lid, vals in self.lines.items():
@@ -288,15 +360,25 @@ class PyPSASim(mosaik_api.Simulator):
             else:
                 down_edges.append(edge)
 
-        networkx.draw_networkx_edges(G, pos, edgelist=active_edges, edge_color='green', width=2)
-        networkx.draw_networkx_edges(G, pos, edgelist=down_edges, edge_color='red', width=2, style='dashed')
+        for lid, vals in self.lines.items():
+            bus0, bus1 = vals["bus0"], vals["bus1"]
+            if bus0 in pos and bus1 in pos:
+                x0, y0 = pos[bus0]
+                x1, y1 = pos[bus1]
+                plt.plot([x0, x1], [y0, y1],
+                        color="green" if line_status.get(lid, 1) == 1 else "red",
+                        linewidth=0.8,
+                        linestyle="--" if line_status.get(lid, 1) == 0 else "-",
+                        alpha=0.8)
+
 
         plt.title(f"Network status - Hour {hour}")
-        plt.axis('equal')
-        plt.axis('off')
-
-        plt.savefig(f"figures/hour_{hour:02d}.png", dpi=150)
+        plt.xlabel("Longitude (°)")
+        plt.ylabel("Latitude (°)")
+        plt.grid(alpha=0.3)
+        plt.savefig(f"figures/hour_{hour:02d}.png", dpi=200, bbox_inches="tight")
         plt.close()
+
 
 
 

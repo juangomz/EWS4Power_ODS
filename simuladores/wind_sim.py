@@ -7,8 +7,8 @@ META = {
     'models': {
         'WindSim2D': {
             'public': True,
-            'params': ['nx', 'ny'],  # grid size
-            'attrs': ['wind_speed', 'grid_x', 'grid_y', 'wind_shape'],  # output attribute
+            'params': ['lat_min', 'lat_max', 'lon_min', 'lon_max', 'nx', 'ny'],
+            'attrs': ['wind_speed', 'grid_lat', 'grid_lon', 'wind_shape'],
         }
     }
 }
@@ -20,57 +20,75 @@ class WindSim2D(mosaik_api.Simulator):
         self.sid = None
         self.eid = None
         self.time = 0
-        self.nx = 10
-        self.ny = 10
+        self.nx = 20
+        self.ny = 20
+        self.lat_min = 38.05   # 🔹 Guardamar del Segura aprox
+        self.lat_max = 38.12
+        self.lon_min = -0.70
+        self.lon_max = -0.60
         self.current = None
-        self.grid_x = None
-        self.gird_y = None
-        
-        
+        self.grid_lat = None
+        self.grid_lon = None
 
+    # --- Inicialización del simulador ---
     def init(self, sid, time_resolution=3600, **sim_params):
         self.sid = sid
         self.time_resolution = time_resolution
         return META
 
-    def create(self, num, model, nx=10, ny=10):
+    # --- Crear entidad WindField ---
+    def create(self, num, model, lat_min=None, lat_max=None, lon_min=None, lon_max=None, nx=20, ny=20):
         self.nx = nx
         self.ny = ny
         self.eid = 'WindField'
-        
-        # ✅ Crear una malla espacial base
-        self.grid_x = np.linspace(0, 10, self.nx)
-        self.grid_y = np.linspace(0, 10, self.ny)
-        
+
+        # ✅ Permitir override de los límites geográficos
+        self.lat_min = lat_min or self.lat_min
+        self.lat_max = lat_max or self.lat_max
+        self.lon_min = lon_min or self.lon_min
+        self.lon_max = lon_max or self.lon_max
+
+        # ✅ Crear malla geográfica en grados
+        self.grid_lat = np.linspace(self.lat_min, self.lat_max, self.ny)
+        self.grid_lon = np.linspace(self.lon_min, self.lon_max, self.nx)
+
         return [{'eid': self.eid, 'type': model, 'rel': []}]
 
+    # --- Simulación del viento ---
     def step(self, time, inputs, max_advance):
         self.time = time
 
-        # --- Temporal pattern ---
-        base_wind = 10 + 5 * np.sin(2 * np.pi * time / (24 * 3600))
+        # 🔹 Base diaria sinusoidal
+        base_wind = 8 + 4 * np.sin(2 * np.pi * time / (24 * 3600))  # m/s
 
-        # --- Spatial variation ---
-        X, Y = np.meshgrid(self.grid_x, self.grid_y)
+        # 🔹 Variación espacial suave
+        LON, LAT = np.meshgrid(self.grid_lon, self.grid_lat)
+        spatial_pattern = np.sin(5 * (LON - self.lon_min)) * np.cos(5 * (LAT - self.lat_min))
 
-        # Base pattern + random noise
-        wind_field = base_wind + 5 * np.sin(X + Y + time / 3600) + np.random.normal(0, 0.5, (self.ny, self.nx))
+        # 🔹 Ruido local (pequeña turbulencia)
+        noise = np.random.normal(0, 0.4, (self.ny, self.nx))
 
-        # Store the current 2D field
+        # Campo de viento combinado
+        wind_field = base_wind + 2 * spatial_pattern + noise
+
+        # Guardar
         self.current = {'wind_speed': wind_field}
 
         return time + self.time_resolution
 
+    # --- Entrega de datos a Mosaik ---
     def get_data(self, outputs):
-        # wind_field es un np.ndarray (ny, nx)
-        if isinstance(self.current['wind_speed'], np.ndarray):
-            wind_data = self.current['wind_speed'].tolist()  # ✅ convertir a lista
-        else:
-            wind_data = self.current['wind_speed']
+        if self.current is None:
+            return {self.eid: {
+                'wind_speed': [],
+                'grid_lat': [],
+                'grid_lon': [],
+                'wind_shape': [0, 0],
+            }}
 
         return {self.eid: {
-            'wind_speed': self.current['wind_speed'].tolist(),  # ✅ importante
-            'grid_x': self.grid_x.tolist(),
-            'grid_y': self.grid_y.tolist(),
+            'wind_speed': self.current['wind_speed'].tolist(),
+            'grid_lat': self.grid_lat.tolist(),
+            'grid_lon': self.grid_lon.tolist(),
             'wind_shape': list(self.current['wind_speed'].shape),
         }}
