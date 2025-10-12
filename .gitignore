@@ -24,6 +24,7 @@ data/
 results/
 output/
 logs/
+pyinstrument_report.html
 
 # === IDE y sistema ===
 .vscode/
