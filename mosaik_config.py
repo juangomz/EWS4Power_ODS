@@ -46,5 +46,19 @@ def main():
     # Ejecutar simulación por 24 horas
     world.run(until=24 * 3600)
 
-if __name__ == '__main__':
-    main()
+from pyinstrument import Profiler
+
+if __name__ == "__main__":
+    profiler = Profiler(interval=0.001, async_mode=True)
+    profiler.start()
+    print("🚀 Simulación iniciada (usa Ctrl+C para detener y ver el perfil)...")
+
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n🛑 Simulación interrumpida manualmente.")
+    finally:
+        profiler.stop()
+        with open("pyinstrument_report.html", "w", encoding="utf-8") as f:
+            f.write(profiler.output_html())
+        print("✅ Informe guardado en pyinstrument_report.html")

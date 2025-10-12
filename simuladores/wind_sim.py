@@ -59,7 +59,7 @@ class WindSim2D(mosaik_api.Simulator):
         self.time = time
 
         # 🔹 Base diaria sinusoidal
-        base_wind = 8 + 4 * np.sin(2 * np.pi * time / (24 * 3600))  # m/s
+        base_wind = 7 + 4 * np.sin(2 * np.pi * time / (24 * 3600))  # m/s
 
         # 🔹 Variación espacial suave
         LON, LAT = np.meshgrid(self.grid_lon, self.grid_lat)
