@@ -31,3 +31,4 @@ pyinstrument_report.html
 .idea/
 .DS_Store
 *.log
+pyinstrument_report.html
