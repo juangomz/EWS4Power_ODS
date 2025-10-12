@@ -47,70 +47,133 @@ class PyPSASim(mosaik_api.Simulator):
         lines_path = os.path.join(data_dir, "lines.csv")
         loads_path = os.path.join(data_dir, "loads.csv")
         gens_path = os.path.join(data_dir, "generators.csv")
-
-        buses = pd.read_csv(buses_path)
-        lines = pd.read_csv(lines_path)
-        loads = pd.read_csv(loads_path)
-        gens = pd.read_csv(gens_path)
-
         
-        # --- 2️⃣ Añadir Buses ---
-        for _, row in buses.iterrows():
-            bus_id = str(row["bus"])
-            n.add("Bus",
-                bus_id,
-                v_nom=float(row.get("v_nom_kv", 20)),
-                carrier="AC")
-            n.buses.at[bus_id, "x"] = float(row["x"])
-            n.buses.at[bus_id, "y"] = float(row["y"])
+        # # --- 2️⃣ Añadir Buses ---
+        # for _, row in buses.iterrows():
+        #     bus_id = str(row["bus"])
+        #     n.add("Bus",
+        #         bus_id,
+        #         v_nom=float(row.get("v_nom_kv", 20)),
+        #         carrier="AC")
+        #     n.buses.at[bus_id, "x"] = float(row["x"])
+        #     n.buses.at[bus_id, "y"] = float(row["y"])
 
-        # --- 3️⃣ Añadir Líneas ---
-        line_data = {}
-        for _, row in lines.iterrows():
-            lid = str(row["line"])
-            bus0, bus1 = str(row["bus0"]), str(row["bus1"])
-            r = float(row.get("r_ohm", 0.1)) * float(row.get("length_km", 1.0))
-            x = float(row.get("x_ohm", 0.3)) * float(row.get("length_km", 1.0))
-            s_nom = float(row.get("s_max_mva", 10.0))
+        # # --- 3️⃣ Añadir Líneas ---
+        # line_data = {}
+        # for _, row in lines.iterrows():
+        #     lid = str(row["line"])
+        #     bus0, bus1 = str(row["bus0"]), str(row["bus1"])
+        #     r = float(row.get("r_ohm", 0.1)) * float(row.get("length_km", 1.0))
+        #     x = float(row.get("x_ohm", 0.3)) * float(row.get("length_km", 1.0))
+        #     s_nom = float(row.get("s_max_mva", 10.0))
 
-            n.add("Line", lid, bus0=bus0, bus1=bus1, r=r, x=x, s_nom=s_nom)
-            line_data[lid] = {"bus0": bus0, "bus1": bus1, "r": r, "x": x, "s_nom": s_nom}
+        #     n.add("Line", lid, bus0=bus0, bus1=bus1, r=r, x=x, s_nom=s_nom)
+        #     line_data[lid] = {"bus0": bus0, "bus1": bus1, "r": r, "x": x, "s_nom": s_nom}
 
-        # --- 4️⃣ Añadir Cargas ---
-        for _, row in loads.iterrows():
-            n.add("Load", str(row["load"]),
-                bus=str(row["bus"]),
-                p_set=float(row["p_set_mw"]),
-                q_set=float(row.get("q_set_mvar", 0.0)))
+        # # --- 4️⃣ Añadir Cargas ---
+        # for _, row in loads.iterrows():
+        #     n.add("Load", str(row["load"]),
+        #         bus=str(row["bus"]),
+        #         p_set=float(row["p_set_mw"]),
+        #         q_set=float(row.get("q_set_mvar", 0.0)))
 
-        # --- 5️⃣ Añadir Generadores ---
-        for _, row in gens.iterrows():
-            n.add("Generator", str(row["gen"]),
-                bus=str(row["bus"]),
-                p_nom=float(row["p_nom_mw"]),
-                control=row.get("control", "PQ"))
+        # # --- 5️⃣ Añadir Generadores ---
+        # for _, row in gens.iterrows():
+        #     n.add("Generator", str(row["gen"]),
+        #         bus=str(row["bus"]),
+        #         p_nom=float(row["p_nom_mw"]),
+        #         control=row.get("control", "PQ"))
             
-        # --- 6️⃣ Normalizar índices en PyPSA ---
+        # # --- 6️⃣ Normalizar índices en PyPSA ---
+        # n.buses.index = n.buses.index.astype(str)
+        # n.lines.index = n.lines.index.astype(str)
+        # n.loads.index = n.loads.index.astype(str)
+        # n.generators.index = n.generators.index.astype(str)
+            
+        # # ✅ Forzar carrier AC en caso de buses sin definir
+        # n.buses["carrier"] = "AC"
+
+        # # Guardamos la referencia local de líneas
+        # self.lines = line_data
+
+        # print(f"✅ Red cargada desde {data_dir}: "
+        #     f"{len(buses)} buses, {len(lines)} líneas, {len(loads)} cargas, {len(gens)} generadores.")
+
+        # # Inicializar estado actual
+        # self.current = {
+        #     'ens': 0.0,
+        #     'num_lines': len(n.lines),
+        #     'currents': {lid: 0.0 for lid in n.lines.index}
+        # }
+        
+        buses_df = pd.read_csv(buses_path)
+        buses_df["bus"] = buses_df["bus"].astype(str).str.strip()
+        buses_df.set_index("bus", inplace=True)
+        buses_df.rename(columns={"v_nom_kv": "v_nom"}, inplace=True)
+
+        # --- ✅ 2️⃣ Añadir todas las líneas de golpe
+        lines_df = pd.read_csv(lines_path)
+        for col in ["line", "bus0", "bus1"]:
+            if col in lines_df.columns:
+                lines_df[col] = lines_df[col].astype(str).str.strip()
+        lines_df.set_index("line", inplace=True)
+        lines_df.rename(columns={"r_ohm": "r", "x_ohm": "x", "s_max_mva": "s_nom"}, inplace=True)
+        
+        # lines_df = pd.DataFrame({
+        #     "bus0": lines["bus0"].astype(str),
+        #     "bus1": lines["bus1"].astype(str),
+        #     "r": lines["r_ohm"] * lines["length_km"],
+        #     "x": lines["x_ohm"] * lines["length_km"],
+        #     "s_nom": lines["s_max_mva"]
+        # }, index=lines["line"].astype(str))
+        
+
+        # --- ✅ 3️⃣ Cargas
+        # loads_df = pd.DataFrame({
+        #     "bus": loads["bus"].astype(str),
+        #     "p_set": loads["p_set_mw"],
+        #     "q_set": loads.get("q_set_mvar", 0.0)
+        # }, index=loads["load"].astype(str))
+        loads_df = pd.read_csv(loads_path)
+        for col in ["load", "bus"]:
+            if col in loads_df.columns:
+                loads_df[col] = loads_df[col].astype(str).str.strip()
+        loads_df.set_index("load", inplace=True)
+        loads_df.rename(columns={"p_set_mw": "p_set", "q_set_mvar": "q_set"}, inplace=True)
+
+        # --- ✅ 4️⃣ Generadores
+        # gens_df = pd.DataFrame({
+        #     "bus": gens["bus"].astype(str),
+        #     "p_nom": gens["p_nom_mw"],
+        #     "control": gens.get("control", "PQ")
+        # }, index=gens["gen"].astype(str))
+        gens_df = pd.read_csv(gens_path)
+        for col in ["gen", "bus"]:
+            if col in gens_df.columns:
+                gens_df[col] = gens_df[col].astype(str).str.strip()
+        gens_df.set_index("gen", inplace=True)
+        gens_df.rename(columns={"p_nom_mw": "p_nom"}, inplace=True)
+
+        # --- 4️⃣ Importar masivamente en PyPSA ---
+        n.import_components_from_dataframe(buses_df, "Bus")
+        n.import_components_from_dataframe(lines_df, "Line")
+        n.import_components_from_dataframe(loads_df, "Load")
+        n.import_components_from_dataframe(gens_df, "Generator")
+
+        # --- 5️⃣ Asegurar coherencia de tipos dentro de PyPSA ---
         n.buses.index = n.buses.index.astype(str)
         n.lines.index = n.lines.index.astype(str)
         n.loads.index = n.loads.index.astype(str)
         n.generators.index = n.generators.index.astype(str)
             
-        # ✅ Forzar carrier AC en caso de buses sin definir
-        n.buses["carrier"] = "AC"
+        # --- ⚙️ Limpieza final
+        # n.buses["carrier"] = "AC"
+        # n.lines.index = n.lines.index.astype(str)
 
-        # Guardamos la referencia local de líneas
-        self.lines = line_data
+        self.lines = lines_df.to_dict(orient="index")
+        self.current = {'ens': 0.0, 'num_lines': len(n.lines), 'currents': {lid: 0.0 for lid in n.lines.index}}
 
-        print(f"✅ Red cargada desde {data_dir}: "
-            f"{len(buses)} buses, {len(lines)} líneas, {len(loads)} cargas, {len(gens)} generadores.")
-
-        # Inicializar estado actual
-        self.current = {
-            'ens': 0.0,
-            'num_lines': len(n.lines),
-            'currents': {lid: 0.0 for lid in n.lines.index}
-        }
+        print(f"✅ Red cargada (bulk import): {len(n.buses)} buses, {len(n.lines)} líneas, {len(n.loads)} cargas, {len(n.generators)} generadores.")
 
     def init(self, sid, **sim_params):
         return META
@@ -154,45 +217,29 @@ class PyPSASim(mosaik_api.Simulator):
                 wind_speed = list(vals['wind_speed'].values())[0]
                 self.last_wind_field = np.array(wind_speed)
 
-
             if 'line_status' in vals:
                 line_status_inputs = vals['line_status']
-
-        # print(f"🌬️  Wind speed = {wind_speed:.2f} m/s")
-        # print(f"⚡ Raw line_status input = {line_status_inputs}")
-
-        # Generar el failure_map automáticamente si aún no existe
-        if not self.failure_map and self.lines:
-            self.failure_map = {f"FailureModel-{i}.FailureProc": lid
-                                for i, lid in enumerate(self.lines.keys())}
-            # print("🔗 failure_map generado automáticamente:", self.failure_map)
 
         # --- 2️⃣ Traducir a líneas reales ---
         if not hasattr(self, "line_status_memory"):
             self.line_status_memory = {lid: 1 for lid in self.lines.keys()}
-    
+
         for src_id, status in line_status_inputs.items():
             line_id = self.failure_map.get(src_id)
             if line_id:
                 if self.line_status_memory[line_id] == 1 and status == 0:
-                    # Solo se pasa de operativa → rota
                     self.line_status_memory[line_id] = 0
             else:
                 print(f"⚠️  {src_id} no tiene mapeo definido, ignorado")
-
-
-        # print(f"🔀 Estado interpretado de líneas = {self.line_status_memory}")
 
         # --- 3️⃣ Actualizar red ---
         for lid, status in self.line_status_memory.items():
             if status == 0:
                 if lid in self.network.lines.index:
-                    # print(f"❌ Eliminando línea {lid}")
                     self.network.remove("Line", lid)
             else:
                 if lid not in self.network.lines.index and lid in self.lines:
                     params = self.lines[lid]
-                    # print(f"✅ Restaurando línea {lid}")
                     self.network.add("Line", lid,
                                     bus0=params["bus0"],
                                     bus1=params["bus1"],
@@ -200,68 +247,128 @@ class PyPSASim(mosaik_api.Simulator):
                                     r=params["r"],
                                     s_nom=params["s_nom"])
 
-        # --- 4️⃣ Flujo de potencia ---
-        try:
+        # --- 4️⃣ Flujo de potencia optimizado con BODF ---
+        # Inicializar BODF una sola vez (flujo base)
+        if not hasattr(self, "BODF"):
+            print("🧮 Calculando BODF base inicial...")
             self.network.lpf()
-            print("🧮 Flujo lineal ejecutado correctamente.")
-        except Exception as e:
-            print(f"💥 Error en lpf(): {e}")
+            sn = self.network.sub_networks.obj[0]
+            sn.calculate_BODF()
+            self.BODF = sn.BODF
+            self.base_flows = self.network.lines_t.p0.loc["now"].copy()
 
-        # --- Calcular corriente aproximada por línea ---
+        if not hasattr(self, "_last_active_lines"):
+            self._last_active_lines = set(self.network.lines.index)
+
+        current_active = set(self.network.lines.index)
+
+        if current_active != self._last_active_lines:
+            failed_lines = self._last_active_lines - current_active
+            repaired_lines = current_active - self._last_active_lines
+
+            # Recalcular si hay demasiados fallos (más del 5 %)
+            if len(failed_lines) / len(self.lines) > 0.05:
+                print("♻️ Muchos fallos simultáneos → recalculando LPF + nueva BODF.")
+                try:
+                    self.network.lpf()
+                    sn = self.network.sub_networks.obj[0]
+                    sn.calculate_BODF()
+                    self.BODF = sn.BODF
+                    self.base_flows = self.network.lines_t.p0.loc["now"].copy()
+                except Exception as e:
+                    print(f"💥 Error al recalcular LPF/BODF: {e}")
+                self._last_active_lines = current_active.copy()
+
+            elif failed_lines and hasattr(self, "BODF"):
+                print(f"⚡ Se detectaron fallos en {len(failed_lines)} líneas → aplicando BODF...")
+                f_before = self.base_flows.copy()
+                warned = 0
+
+                for lid in failed_lines:
+                    try:
+                        if lid in self.lines:
+                            k = list(self.lines.keys()).index(lid)
+                        else:
+                            continue
+
+                        if k >= self.BODF.shape[1]:
+                            continue
+
+                        delta_f = self.BODF[:, k] * f_before.get(lid, 0.0)
+                        f_before += delta_f
+                    except Exception as e:
+                        if warned < 3:
+                            print(f"⚠️ No se pudo aplicar BODF a {lid}: {e}")
+                        warned += 1
+
+                # Actualizar los flujos solo de líneas activas
+                active_lines = self.network.lines.index
+                valid_flows = f_before.reindex(active_lines, fill_value=0.0)
+                self.network.lines_t.p0.loc["now"] = valid_flows
+                self.base_flows = f_before.copy()
+                print("✅ Flujo actualizado con BODF (sin recalcular LPF completo).")
+
+            else:
+                print("🔁 Cambios mayores → recalculando flujo completo (LPF)...")
+                try:
+                    self.network.lpf()
+                    sn = self.network.sub_networks.obj[0]
+                    sn.calculate_BODF()
+                    self.BODF = sn.BODF
+                    self.base_flows = self.network.lines_t.p0.loc["now"].copy()
+                    print("🧮 Flujo y BODF recalculados.")
+                except Exception as e:
+                    print(f"💥 Error al recalcular LPF/BODF: {e}")
+
+            self._last_active_lines = current_active.copy()
+        else:
+            print("⏸️ Sin cambios topológicos → se omite recalculo de flujo.")
+
+        # --- 5️⃣ Calcular corriente aproximada por línea ---
         currents = {}
         for lid, line in self.network.lines.iterrows():
             try:
-                # Potencia activa (MW) -> convertir a kW para 0.4 kV nominal
                 p = abs(self.network.lines_t.p0[lid].iloc[0]) * 1e3
-                v = self.network.buses.at[line.bus0, 'v_nom'] * 1e3  # V
-                i = p / (v if v > 0 else 1)  # I ≈ P/V
+                v = self.network.buses.at[line.bus0, 'v_nom'] * 1e3
+                i = p / (v if v > 0 else 1)
                 currents[lid] = round(i, 3)
             except (KeyError, IndexError):
                 currents[lid] = 0.0
 
         import networkx as nx
 
-        # --- 5️⃣ Calcular ENS (Energy Not Supplied) de forma general ---
+        # --- 6️⃣ Calcular ENS ---
         G = self.network.graph()
-
-        # Suma total esperada de carga (MW)
         expected_load = abs(self.network.loads["p_set"]).sum()
         actual_load = 0.0
 
-        # Buscar todos los generadores conectados y sus buses
-        gen_buses = set(self.network.generators["bus"])
+        for component in nx.connected_components(G):
+            sub_buses = set(component)
+            loads_sub = self.network.loads[self.network.loads["bus"].isin(sub_buses)]
+            gens_sub = self.network.generators[self.network.generators["bus"].isin(sub_buses)]
 
-        # Iterar sobre cada carga
-        for load_id, load_row in self.network.loads.iterrows():
-            bus = load_row["bus"]
+            load_sum = abs(loads_sub["p_set"]).sum()
+            gen_sum = gens_sub["p_nom"].sum()
 
-            # Si hay al menos un camino desde esta carga a algún generador → está alimentada
-            connected = any(nx.has_path(G, bus, gen_bus) for gen_bus in gen_buses if bus in G and gen_bus in G)
-
-            if connected:
-                # Si la red está conectada, la potencia servida es igual a la programada
-                actual_load += abs(load_row["p_set"])
+            if gen_sum >= load_sum:
+                actual_load += load_sum
             else:
-                # Si está aislada, se considera no servida
-                pass
+                actual_load += gen_sum
 
-        # ENS = potencia esperada - potencia realmente servida
         ens = max(0.0, expected_load - actual_load)
 
         print(f"📊 Expected load = {expected_load:.2f}, ENS = {ens:.2f}")
         print("guardando plots...")
         self.plot_network(hour, self.line_status_memory)
 
-        # --- 6️⃣ Guardar CSV por hora ---
+        # --- 7️⃣ Guardar CSV por hora ---
         os.makedirs("results", exist_ok=True)
         filename = f"results/hour_{hour:02d}.csv"
-
         fieldnames = ["hour", "wind_speed"] + list(self.lines.keys()) + ["ens"]
 
         with open(filename, mode="w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
-
             row = {"hour": hour, "wind_speed": wind_speed, "ens": ens}
             for lid in self.lines.keys():
                 row[lid] = self.line_status_memory.get(lid, 1)
@@ -269,13 +376,15 @@ class PyPSASim(mosaik_api.Simulator):
 
         print(f"📝 CSV guardado -> {filename}")
 
-        # --- 7️⃣ Actualizar salida Mosaik ---
+        # --- 8️⃣ Salida para Mosaik ---
         self.current = {
             'ens': ens,
             'currents': currents,
             'num_lines': len(self.network.lines)
         }
+
         return time + 3600
+
 
 
     def get_data(self, outputs=None):
