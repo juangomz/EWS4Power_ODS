@@ -42,98 +42,28 @@ class PyPSASim(mosaik_api.Simulator):
         n = self.network
         n.set_snapshots(["now"])
         
-        # --- 1️⃣ Leer CSVs ---
+        # --- Leer CSVs ---
         buses_path = os.path.join(data_dir, "buses.csv")
         lines_path = os.path.join(data_dir, "lines.csv")
         loads_path = os.path.join(data_dir, "loads.csv")
         gens_path = os.path.join(data_dir, "generators.csv")
         
-        # # --- 2️⃣ Añadir Buses ---
-        # for _, row in buses.iterrows():
-        #     bus_id = str(row["bus"])
-        #     n.add("Bus",
-        #         bus_id,
-        #         v_nom=float(row.get("v_nom_kv", 20)),
-        #         carrier="AC")
-        #     n.buses.at[bus_id, "x"] = float(row["x"])
-        #     n.buses.at[bus_id, "y"] = float(row["y"])
-
-        # # --- 3️⃣ Añadir Líneas ---
-        # line_data = {}
-        # for _, row in lines.iterrows():
-        #     lid = str(row["line"])
-        #     bus0, bus1 = str(row["bus0"]), str(row["bus1"])
-        #     r = float(row.get("r_ohm", 0.1)) * float(row.get("length_km", 1.0))
-        #     x = float(row.get("x_ohm", 0.3)) * float(row.get("length_km", 1.0))
-        #     s_nom = float(row.get("s_max_mva", 10.0))
-
-        #     n.add("Line", lid, bus0=bus0, bus1=bus1, r=r, x=x, s_nom=s_nom)
-        #     line_data[lid] = {"bus0": bus0, "bus1": bus1, "r": r, "x": x, "s_nom": s_nom}
-
-        # # --- 4️⃣ Añadir Cargas ---
-        # for _, row in loads.iterrows():
-        #     n.add("Load", str(row["load"]),
-        #         bus=str(row["bus"]),
-        #         p_set=float(row["p_set_mw"]),
-        #         q_set=float(row.get("q_set_mvar", 0.0)))
-
-        # # --- 5️⃣ Añadir Generadores ---
-        # for _, row in gens.iterrows():
-        #     n.add("Generator", str(row["gen"]),
-        #         bus=str(row["bus"]),
-        #         p_nom=float(row["p_nom_mw"]),
-        #         control=row.get("control", "PQ"))
-            
-        # # --- 6️⃣ Normalizar índices en PyPSA ---
-        # n.buses.index = n.buses.index.astype(str)
-        # n.lines.index = n.lines.index.astype(str)
-        # n.loads.index = n.loads.index.astype(str)
-        # n.generators.index = n.generators.index.astype(str)
-            
-        # # ✅ Forzar carrier AC en caso de buses sin definir
-        # n.buses["carrier"] = "AC"
-
-        # # Guardamos la referencia local de líneas
-        # self.lines = line_data
-
-        # print(f"✅ Red cargada desde {data_dir}: "
-        #     f"{len(buses)} buses, {len(lines)} líneas, {len(loads)} cargas, {len(gens)} generadores.")
-
-        # # Inicializar estado actual
-        # self.current = {
-        #     'ens': 0.0,
-        #     'num_lines': len(n.lines),
-        #     'currents': {lid: 0.0 for lid in n.lines.index}
-        # }
+        # --- Buses ---
         
         buses_df = pd.read_csv(buses_path)
         buses_df["bus"] = buses_df["bus"].astype(str).str.strip()
         buses_df.set_index("bus", inplace=True)
         buses_df.rename(columns={"v_nom_kv": "v_nom"}, inplace=True)
 
-        # --- ✅ 2️⃣ Añadir todas las líneas de golpe
+        # --- Lineas ---
         lines_df = pd.read_csv(lines_path)
         for col in ["line", "bus0", "bus1"]:
             if col in lines_df.columns:
                 lines_df[col] = lines_df[col].astype(str).str.strip()
         lines_df.set_index("line", inplace=True)
         lines_df.rename(columns={"r_ohm": "r", "x_ohm": "x", "s_max_mva": "s_nom"}, inplace=True)
-        
-        # lines_df = pd.DataFrame({
-        #     "bus0": lines["bus0"].astype(str),
-        #     "bus1": lines["bus1"].astype(str),
-        #     "r": lines["r_ohm"] * lines["length_km"],
-        #     "x": lines["x_ohm"] * lines["length_km"],
-        #     "s_nom": lines["s_max_mva"]
-        # }, index=lines["line"].astype(str))
-        
 
-        # --- ✅ 3️⃣ Cargas
-        # loads_df = pd.DataFrame({
-        #     "bus": loads["bus"].astype(str),
-        #     "p_set": loads["p_set_mw"],
-        #     "q_set": loads.get("q_set_mvar", 0.0)
-        # }, index=loads["load"].astype(str))
+        # --- Cargas ---
         loads_df = pd.read_csv(loads_path)
         for col in ["load", "bus"]:
             if col in loads_df.columns:
@@ -141,12 +71,7 @@ class PyPSASim(mosaik_api.Simulator):
         loads_df.set_index("load", inplace=True)
         loads_df.rename(columns={"p_set_mw": "p_set", "q_set_mvar": "q_set"}, inplace=True)
 
-        # --- ✅ 4️⃣ Generadores
-        # gens_df = pd.DataFrame({
-        #     "bus": gens["bus"].astype(str),
-        #     "p_nom": gens["p_nom_mw"],
-        #     "control": gens.get("control", "PQ")
-        # }, index=gens["gen"].astype(str))
+        # --- Generadores ---
         gens_df = pd.read_csv(gens_path)
         for col in ["gen", "bus"]:
             if col in gens_df.columns:
@@ -154,21 +79,17 @@ class PyPSASim(mosaik_api.Simulator):
         gens_df.set_index("gen", inplace=True)
         gens_df.rename(columns={"p_nom_mw": "p_nom"}, inplace=True)
 
-        # --- 4️⃣ Importar masivamente en PyPSA ---
+        # --- Importar masivamente en PyPSA ---
         n.import_components_from_dataframe(buses_df, "Bus")
         n.import_components_from_dataframe(lines_df, "Line")
         n.import_components_from_dataframe(loads_df, "Load")
         n.import_components_from_dataframe(gens_df, "Generator")
 
-        # --- 5️⃣ Asegurar coherencia de tipos dentro de PyPSA ---
+        # --- Asegurar coherencia de tipos dentro de PyPSA ---
         n.buses.index = n.buses.index.astype(str)
         n.lines.index = n.lines.index.astype(str)
         n.loads.index = n.loads.index.astype(str)
         n.generators.index = n.generators.index.astype(str)
-            
-        # --- ⚙️ Limpieza final
-        # n.buses["carrier"] = "AC"
-        # n.lines.index = n.lines.index.astype(str)
 
         self.lines = lines_df.to_dict(orient="index")
         self.current = {'ens': 0.0, 'num_lines': len(n.lines), 'currents': {lid: 0.0 for lid in n.lines.index}}
