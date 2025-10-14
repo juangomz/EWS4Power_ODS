@@ -26,6 +26,7 @@ figures/
 output/
 logs/
 pyinstrument_report.html
+cache/
 
 # === IDE y sistema ===
 .vscode/
