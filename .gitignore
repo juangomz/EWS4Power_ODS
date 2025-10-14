@@ -22,6 +22,7 @@ data/
 *.tar
 *.gz
 results/
+figures/
 output/
 logs/
 pyinstrument_report.html

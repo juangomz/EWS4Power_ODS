@@ -41,7 +41,7 @@ def main():
         world.connect(f, g, ('line_status', 'line_status'))
 
     # 3️⃣ El viento también alimenta al grid directamente
-    world.connect(w, g, ('wind_speed', 'wind_speed'))
+    world.connect(w, g, 'wind_speed', 'grid_lon', 'grid_lat', 'wind_shape')
     
     # Ejecutar simulación por 24 horas
     world.run(until=24 * 3600)

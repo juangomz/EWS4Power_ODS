@@ -78,23 +78,46 @@ class FailureModel(mosaik_api.Simulator):
 
     # ============================================================
     # Muestra viento a lo largo de una línea y calcula fallo
-    def compute_failure(self, x0, y0, x1, y1, threshold=10.0):
+    def compute_failure(self, x0, y0, x1, y1,
+                    v_th_mean=18.0, alpha_mean=0.0006, beta_mean=3.0,
+                    sigma_vth=2, sigma_alpha=0.0002, sigma_beta=0.4):
+        """
+        Modelo de fallo exponencial (Weibull-like) con dispersión en parámetros.
+        Devuelve probabilidad de fallo y velocidad máxima observada en el tramo.
+        """
+
         n = 10
         xs = np.linspace(x0, x1, n)
         ys = np.linspace(y0, y1, n)
         vals = [self.interp2_bilinear(x, y) for x, y in zip(xs, ys)]
-        mean_v = float(np.mean(vals))
-        # Regla simple: si el promedio > umbral, línea falla
-        status = 0 if mean_v > threshold else 1
-        return status, mean_v
+        max_v = float(np.max(vals))
+
+        # Incluir dispesión en parámetros
+        v_th = np.random.normal(v_th_mean, sigma_vth)       # umbral de inicio de daños
+        alpha = np.random.normal(alpha_mean, sigma_alpha)   # escala del crecimiento
+        beta = np.random.normal(beta_mean, sigma_beta)      # curvatura de la fragilidad
+
+        # Evitar valores negativos o absurdos
+        v_th = max(10, v_th)
+        alpha = max(0.001, alpha)
+        beta = np.clip(beta, 1.5, 5.0)
+
+        # Calcular probabilidad de fallo
+        v_eff = max_v
+        if v_eff > v_th:
+            P = 1 - np.exp(-alpha * (v_eff - v_th) ** beta)
+        else:
+            P = 0.0
+
+        return P, max_v
     
      # ============================================================
     def step(self, time, inputs, max_advance):
         self.time = time
         self.wind_field = None
 
-        # 1️⃣ Leer entradas desde WindSim y PyPSASim
-        for src, vals in inputs.items():
+        # leer entradas desde wind_sim y pypsa_sim
+        for _, vals in inputs.items():
             if 'wind_speed' in vals:
                 w = list(vals['wind_speed'].values())[0]
                 if isinstance(w, list) or isinstance(w, np.ndarray):
@@ -110,7 +133,7 @@ class FailureModel(mosaik_api.Simulator):
             if 'wind_shape' in vals:
                 self.wind_shape = tuple(list(vals['wind_shape'].values())[0])
 
-        # 2️⃣ Calcular fallos si hay datos suficientes
+        # Calcular fallos para cada línea
         if self.wind_field is not None and self.line_positions:
             for eid, state in self.entities.items():
                 # Extraer posición asociada a esta línea
@@ -119,15 +142,20 @@ class FailureModel(mosaik_api.Simulator):
                 if i < len(lids):
                     lid = lids[i]
                     lp = self.line_positions[lid]
-                    status, mean_v = self.compute_failure(lp['x0'], lp['y0'], lp['x1'], lp['y1'])
+                    P, max_v = self.compute_failure(lp['x0'], lp['y0'], lp['x1'], lp['y1'])
+                    if np.random.rand() < P:
+                        status = 0  # fallo
+                    else:
+                        status = 1  # operativo
                     state['line_status'] = status
-                    state['wind_speed'] = mean_v
+                    state['wind_speed'] = max_v
                     # print(f"[t={time/3600:.0f}h] {lid}: mean_v={mean_v:.1f} → line={status}")
         else:
-            print(f"[t={time/3600:.0f}h] ⚠️ No hay datos de viento o posiciones.")
+            print(f"[t={time/3600:.0f}h] No hay datos de viento o posiciones.")
 
         return time + 3600
 
+    # Entrega de datos a Mosaik
     def get_data(self, outputs):
         data = {}
         for eid, attrs in outputs.items():
@@ -137,6 +165,6 @@ class FailureModel(mosaik_api.Simulator):
                     'line_status': self.entities[eid]['line_status'],
                     'wind_speed': self.entities[eid]['wind_speed'],
                 }
-        # print("📤 get_data() →", data)
+
         return data
 

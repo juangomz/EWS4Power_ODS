@@ -22,7 +22,7 @@ class WindSim2D(mosaik_api.Simulator):
         self.time = 0
         self.nx = 20
         self.ny = 20
-        self.lat_min = 38.05   # 🔹 Guardamar del Segura aprox
+        self.lat_min = 38   # 🔹 Guardamar del Segura aprox
         self.lat_max = 38.12
         self.lon_min = -0.70
         self.lon_max = -0.60
@@ -57,26 +57,44 @@ class WindSim2D(mosaik_api.Simulator):
     # --- Simulación del viento ---
     def step(self, time, inputs, max_advance):
         self.time = time
+        t_h = time / 3600.0
 
-        # 🔹 Base diaria sinusoidal
-        base_wind = 7 + 4 * np.sin(2 * np.pi * time / (24 * 3600))  # m/s
-
-        # 🔹 Variación espacial suave
+        # === 1️⃣ Definir dominio ===
         LON, LAT = np.meshgrid(self.grid_lon, self.grid_lat)
-        spatial_pattern = np.sin(5 * (LON - self.lon_min)) * np.cos(5 * (LAT - self.lat_min))
+        deg2km = 111.0
 
-        # 🔹 Ruido local (pequeña turbulencia)
-        noise = np.random.normal(0, 0.4, (self.ny, self.nx))
+        # 🔹 Centro del tornado (moviéndose lentamente)
+        lon_c = np.mean(self.grid_lon) + 0.05 * np.sin(t_h / 2)
+        lat_c = np.mean(self.grid_lat) + 0.05 * np.sin(t_h / 3)
 
-        # Campo de viento combinado
-        wind_field = base_wind + 2 * spatial_pattern + noise
+        # === 2️⃣ Convertir a coordenadas (km) relativas al centro ===
+        dx = (LON - lon_c) * deg2km * np.cos(np.radians(lat_c))
+        dy = (LAT - lat_c) * deg2km
+        r = np.sqrt(dx**2 + dy**2) + 1e-6  # km
 
-        # Guardar
+        # === 3️⃣ Perfil Rankine ===
+        Rc = 1  # radio del núcleo (km)
+        Vmax_peak = 35.0  # m/s (tornado severo)
+        growth = np.clip(t_h / 5.0, 0, 1)  # crecimiento en las primeras 5 horas
+        Vmax = Vmax_peak * growth
+        V = np.where(r < Rc, Vmax * (r / Rc), Vmax * (Rc / r))
+
+        # === 4️⃣ Dirección de rotación (ciclónica)
+        u = -dy / r * V
+        v =  dx / r * V
+
+        # === 5️⃣ Magnitud y ruido
+        wind_field = np.sqrt(u**2 + v**2)
+        wind_field += np.random.normal(0, 1.0, wind_field.shape)
+        wind_field = np.clip(wind_field, 0, None)
+
+        # === 6️⃣ Guardar ===
         self.current = {'wind_speed': wind_field}
+        self.wind_field = wind_field
 
         return time + self.time_resolution
 
-    # --- Entrega de datos a Mosaik ---
+    # Entrega de datos a Mosaik
     def get_data(self, outputs):
         if self.current is None:
             return {self.eid: {
