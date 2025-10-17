@@ -5,16 +5,16 @@ META = {
     'api_version': '3.0',
     'type': 'time-based',
     'models': {
-        'WindSim2D': {
+        'ClimateSim2D': {
             'public': True,
-            'params': ['lat_min', 'lat_max', 'lon_min', 'lon_max', 'nx', 'ny'],
-            'attrs': ['wind_speed', 'grid_lat', 'grid_lon', 'wind_shape'],
+            'params': ['lat_min', 'lat_max', 'lon_min', 'lon_max', 'nx', 'ny', 'seed', 'bg_wind_ms', 'drain_rate', 'runoff_max'],
+            'attrs': ['wind_speed', 'wind_shape' 'rain_intensity', 'flood_depth', 'grid_lat', 'grid_lon', 'field_shape'],
         }
     }
 }
 
 
-class WindSim2D(mosaik_api.Simulator):
+class ClimateSim2D(mosaik_api.Simulator):
     def __init__(self):
         super().__init__(META)
         self.sid = None
@@ -22,7 +22,7 @@ class WindSim2D(mosaik_api.Simulator):
         self.time = 0
         self.nx = 20
         self.ny = 20
-        self.lat_min = 38   # 🔹 Guardamar del Segura aprox
+        self.lat_min = 38   # Guardamar del Segura aprox
         self.lat_max = 38.12
         self.lon_min = -0.70
         self.lon_max = -0.60
@@ -40,15 +40,15 @@ class WindSim2D(mosaik_api.Simulator):
     def create(self, num, model, lat_min=None, lat_max=None, lon_min=None, lon_max=None, nx=20, ny=20):
         self.nx = nx
         self.ny = ny
-        self.eid = 'WindField'
+        self.eid = 'ClimateField'
 
-        # ✅ Permitir override de los límites geográficos
+        # Permitir override de los límites geográficos
         self.lat_min = lat_min or self.lat_min
         self.lat_max = lat_max or self.lat_max
         self.lon_min = lon_min or self.lon_min
         self.lon_max = lon_max or self.lon_max
 
-        # ✅ Crear malla geográfica en grados
+        # Crear malla geográfica en grados
         self.grid_lat = np.linspace(self.lat_min, self.lat_max, self.ny)
         self.grid_lon = np.linspace(self.lon_min, self.lon_max, self.nx)
 
@@ -59,15 +59,15 @@ class WindSim2D(mosaik_api.Simulator):
         self.time = time
         t_h = time / 3600.0
 
-        # === 1️⃣ Definir dominio ===
+        # === Definir dominio ===
         LON, LAT = np.meshgrid(self.grid_lon, self.grid_lat)
         deg2km = 111.0
 
-        # 🔹 Centro del tornado (moviéndose lentamente)
+        # Centro del tornado (moviéndose lentamente)
         lon_c = np.mean(self.grid_lon) + 0.05 * np.sin(t_h / 2)
         lat_c = np.mean(self.grid_lat) + 0.05 * np.sin(t_h / 3)
 
-        # === 2️⃣ Convertir a coordenadas (km) relativas al centro ===
+        # === Convertir a coordenadas (km) relativas al centro ===
         dx = (LON - lon_c) * deg2km * np.cos(np.radians(lat_c))
         dy = (LAT - lat_c) * deg2km
         r = np.sqrt(dx**2 + dy**2) + 1e-6  # km

@@ -23,7 +23,7 @@ META = {
         'PyPSA_Grid': {
             'public': True,
             'params': [],
-            'attrs': ['line_status','wind_speed', 'ens', 'line_positions', 'grid_lon', 'grid_lat', 'wind_shape'],  # ✅ solo strings
+            'attrs': ['line_status','wind_speed', 'ens', 'line_positions', 'grid_lon', 'grid_lat', 'wind_shape', 'flood_depth', 'rain_intensity', 'terrain'],  # ✅ solo strings
         }
     }
 }
@@ -143,6 +143,19 @@ class PyPSASim(mosaik_api.Simulator):
     
             if 'line_status' in vals:
                 line_status_inputs = vals['line_status']
+                
+            if 'rain_intensity' in vals:
+                rain_intensity = list(vals['rain_intensity'].values())[0]
+                self.last_rain_field = np.array(rain_intensity)
+            
+            if 'flood_depth' in vals:
+                flood_depth = list(vals['flood_depth'].values())[0]
+                self.last_flood_field = np.array(flood_depth)
+                
+            if 'terrain' in vals:
+                terrain_data = list(vals['terrain'].values())[0]
+                # Lo almacenamos, asumiendo que tiene la misma forma que los campos climáticos
+                self.terrain_normalized = np.array(terrain_data).reshape(self.wind_shape)
 
         # --- 2️⃣ Traducir a líneas reales ---
         if not hasattr(self, "line_status_memory"):
@@ -329,89 +342,339 @@ class PyPSASim(mosaik_api.Simulator):
             }
         }
         
+    # def plot_network(self, hour, line_status):
+    #     """Dibuja el estado actual de la red sobre el mapa de viento (en coordenadas físicas km)."""
+
+    #     G = self.network.graph()
+
+    #     # Posiciones de buses
+    #     pos = {
+    #         bus: (
+    #             float(self.network.buses.at[bus, "x"]),  # lon
+    #             float(self.network.buses.at[bus, "y"])   # lat
+    #         )
+    #         for bus in self.network.buses.index
+    #     }
+
+    #     plt.figure(figsize=(8, 6))
+
+    #     # Dibujar mapa de viento en km
+    #     if hasattr(self, "last_wind_field") and isinstance(self.last_wind_field, np.ndarray):
+
+    #         # Obtener límites del grid (lon/lat)
+    #         if hasattr(self, "wind_grid_lon") and hasattr(self, "wind_grid_lat"):
+    #             lon_min, lon_max = min(self.wind_grid_lon), max(self.wind_grid_lon)
+    #             lat_min, lat_max = min(self.wind_grid_lat), max(self.wind_grid_lat)
+    #         else:
+    #             lon_min, lon_max = min(v[0] for v in pos.values()), max(v[0] for v in pos.values())
+    #             lat_min, lat_max = min(v[1] for v in pos.values()), max(v[1] for v in pos.values())
+
+    #         # Conversión a coordenadas físicas (km)
+    #         deg2km = 111.0
+    #         lon_ref = np.mean([lon_min, lon_max])
+    #         lat_ref = np.mean([lat_min, lat_max])
+
+    #         x_km = (np.array(self.grid_lon) - lon_ref) * deg2km * np.cos(np.radians(lat_ref))
+    #         y_km = (np.array(self.grid_lat) - lat_ref) * deg2km
+    #         extent_km = [x_km.min(), x_km.max(), y_km.min(), y_km.max()]
+
+    #         # Plot del campo de viento
+    #         plt.imshow(
+    #             self.last_wind_field,
+    #             origin='lower',
+    #             cmap='plasma',
+    #             alpha=0.6,
+    #             extent=extent_km,
+    #             vmin=0,
+    #             vmax=20,
+    #         )
+    #         plt.colorbar(label='Wind speed [m/s]', shrink=0.7)
+
+    #     else:
+    #         print("No hay campo de viento disponible para graficar.")
+
+    #     # Convertir posiciones de buses a km 
+    #     deg2km = 111.0
+    #     pos_km = {
+    #         bus: (
+    #             (v[0] - lon_ref) * deg2km * np.cos(np.radians(lat_ref)),
+    #             (v[1] - lat_ref) * deg2km,
+    #         )
+    #         for bus, v in pos.items()
+    #     }
+
+    #     #  Dibujar red eléctrica
+    #     nx.draw_networkx_nodes(G, pos_km, node_color='skyblue', node_size=2, edgecolors='black')
+
+    #     for lid, vals in self.lines.items():
+    #         bus0, bus1 = vals["bus0"], vals["bus1"]
+    #         if bus0 in pos_km and bus1 in pos_km:
+    #             x0, y0 = pos_km[bus0]
+    #             x1, y1 = pos_km[bus1]
+    #             plt.plot(
+    #                 [x0, x1], [y0, y1],
+    #                 color="green" if line_status.get(lid, 1) == 1 else "red",
+    #                 linewidth=0.8,
+    #                 linestyle="--" if line_status.get(lid, 1) == 0 else "-",
+    #                 alpha=0.8,
+    #             )
+
+    #     # -Formatear y guardar plots
+    #     plt.title(f"Network status - Hour {hour}")
+    #     plt.xlabel("Distancia Este–Oeste [km]")
+    #     plt.ylabel("Distancia Norte–Sur [km]")
+    #     plt.gca().set_aspect('equal', adjustable='box')
+    #     plt.grid(alpha=0.3)
+    #     plt.tight_layout()
+    #     plt.savefig(f"figures/hour_{hour:02d}.png", dpi=200, bbox_inches="tight")
+    #     plt.close()
+    
+    # def plot_network(self, hour, line_status):
+    #     """Dibuja la red eléctrica sobre los campos climáticos (viento, lluvia, inundación)."""
+
+    #     import matplotlib.pyplot as plt
+    #     import networkx as nx
+    #     import numpy as np
+
+    #     G = self.network.graph()
+
+    #     # Posiciones de buses
+    #     pos = {
+    #         bus: (
+    #             float(self.network.buses.at[bus, "x"]),  # lon
+    #             float(self.network.buses.at[bus, "y"])   # lat
+    #         )
+    #         for bus in self.network.buses.index
+    #     }
+
+    #     # Comprobar que existen los campos climáticos
+    #     if not (hasattr(self, "last_wind_field") and isinstance(self.last_wind_field, np.ndarray)):
+    #         print("⚠️ No hay campo de viento disponible para graficar.")
+    #         return
+
+    #     # Obtener límites del grid (lon/lat)
+    #     if hasattr(self, "wind_grid_lon") and hasattr(self, "wind_grid_lat"):
+    #         lon_min, lon_max = min(self.wind_grid_lon), max(self.wind_grid_lon)
+    #         lat_min, lat_max = min(self.wind_grid_lat), max(self.wind_grid_lat)
+    #     else:
+    #         lon_min, lon_max = min(v[0] for v in pos.values()), max(v[0] for v in pos.values())
+    #         lat_min, lat_max = min(v[1] for v in pos.values()), max(v[1] for v in pos.values())
+
+    #     # Conversión a coordenadas físicas (km)
+    #     deg2km = 111.0
+    #     lon_ref = np.mean([lon_min, lon_max])
+    #     lat_ref = np.mean([lat_min, lat_max])
+    #     x_km = (np.array(self.grid_lon) - lon_ref) * deg2km * np.cos(np.radians(lat_ref))
+    #     y_km = (np.array(self.grid_lat) - lat_ref) * deg2km
+    #     extent_km = [x_km.min(), x_km.max(), y_km.min(), y_km.max()]
+
+    #     # Campos climáticos
+    #     fields = {
+    #         "Wind speed [m/s]": getattr(self, "last_wind_field", None),
+    #         "Rain intensity [mm/h]": getattr(self, "last_rain_field", None),
+    #         "Flood depth [m]": getattr(self, "last_flood_field", None),
+    #     }
+    #     cmaps = {
+    #         "Wind speed [m/s]": "plasma",
+    #         "Rain intensity [mm/h]": "Blues",
+    #         "Flood depth [m]": "GnBu",
+    #     }
+    #     vmins = {"Wind speed [m/s]": 0, "Rain intensity [mm/h]": 0, "Flood depth [m]": 0}
+    #     vmaxs = {"Wind speed [m/s]": 30, "Rain intensity [mm/h]": 80, "Flood depth [m]": 1.5}
+
+    #     # Crear figura con 3 subplots
+    #     fig, axes = plt.subplots(1, 3, figsize=(15, 5), constrained_layout=True)
+
+    #     for ax, (title, field) in zip(axes, fields.items()):
+    #         if field is None:
+    #             ax.text(0.5, 0.5, f"No data for {title}", ha="center", va="center", color="gray")
+    #             ax.axis("off")
+    #             continue
+
+    #         im = ax.imshow(
+    #             field,
+    #             origin="lower",
+    #             cmap=cmaps[title],
+    #             alpha=0.75,
+    #             extent=extent_km,
+    #             vmin=vmins[title],
+    #             vmax=vmaxs[title],
+    #         )
+    #         ax.set_title(title, fontsize=10)
+    #         ax.set_xlabel("Distancia E-O [km]")
+    #         ax.set_ylabel("Distancia N-S [km]")
+    #         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    #         # Convertir posiciones de buses a km
+    #         pos_km = {
+    #             bus: (
+    #                 (v[0] - lon_ref) * deg2km * np.cos(np.radians(lat_ref)),
+    #                 (v[1] - lat_ref) * deg2km,
+    #             )
+    #             for bus, v in pos.items()
+    #         }
+
+    #         # Dibujar red
+    #         nx.draw_networkx_nodes(G, pos_km, node_color='skyblue', node_size=8, ax=ax, edgecolors='black')
+    #         for lid, vals in self.lines.items():
+    #             bus0, bus1 = vals["bus0"], vals["bus1"]
+    #             if bus0 in pos_km and bus1 in pos_km:
+    #                 x0, y0 = pos_km[bus0]
+    #                 x1, y1 = pos_km[bus1]
+    #                 ax.plot(
+    #                     [x0, x1], [y0, y1],
+    #                     color="green" if line_status.get(lid, 1) == 1 else "red",
+    #                     linewidth=0.8,
+    #                     linestyle="--" if line_status.get(lid, 1) == 0 else "-",
+    #                     alpha=0.8,
+    #                 )
+
+    #     plt.suptitle(f"Red eléctrica y campos climáticos — hora {hour}", fontsize=12)
+    #     plt.savefig(f"figures/hour_{hour:02d}_climate.png")
+    #     plt.close()
+
     def plot_network(self, hour, line_status):
-        """Dibuja el estado actual de la red sobre el mapa de viento (en coordenadas físicas km)."""
+        """Dibuja la red eléctrica sobre los campos climáticos (viento, lluvia, TERRENO + INUNDACIÓN)."""
+
+        # Importaciones locales (como ya estaban)
+        import matplotlib.pyplot as plt
+        import networkx as nx
+        import numpy as np
 
         G = self.network.graph()
 
-        # Posiciones de buses
+        # Posiciones de buses (asumiendo que las coordenadas 'x' y 'y' en PyPSA son Lat/Lon)
         pos = {
             bus: (
-                float(self.network.buses.at[bus, "x"]),  # lon
-                float(self.network.buses.at[bus, "y"])   # lat
+                float(self.network.buses.at[bus, "x"]), # lon
+                float(self.network.buses.at[bus, "y"])  # lat
             )
             for bus in self.network.buses.index
         }
 
-        plt.figure(figsize=(8, 6))
+        # Verificación de datos
+        if not (hasattr(self, "last_wind_field") and hasattr(self, "terrain_normalized") and 
+                hasattr(self, "grid_lon") and hasattr(self, "grid_lat")):
+             print("⚠️ No hay campos climáticos/terreno completos (grid_lon, grid_lat) disponibles para graficar.")
+             return
 
-        # Dibujar mapa de viento en km
-        if hasattr(self, "last_wind_field") and isinstance(self.last_wind_field, np.ndarray):
-
-            # Obtener límites del grid (lon/lat)
-            if hasattr(self, "wind_grid_lon") and hasattr(self, "wind_grid_lat"):
-                lon_min, lon_max = min(self.wind_grid_lon), max(self.wind_grid_lon)
-                lat_min, lat_max = min(self.wind_grid_lat), max(self.wind_grid_lat)
-            else:
-                lon_min, lon_max = min(v[0] for v in pos.values()), max(v[0] for v in pos.values())
-                lat_min, lat_max = min(v[1] for v in pos.values()), max(v[1] for v in pos.values())
-
-            # Conversión a coordenadas físicas (km)
-            deg2km = 111.0
-            lon_ref = np.mean([lon_min, lon_max])
-            lat_ref = np.mean([lat_min, lat_max])
-
-            x_km = (np.array(self.grid_lon) - lon_ref) * deg2km * np.cos(np.radians(lat_ref))
-            y_km = (np.array(self.grid_lat) - lat_ref) * deg2km
-            extent_km = [x_km.min(), x_km.max(), y_km.min(), y_km.max()]
-
-            # Plot del campo de viento
-            plt.imshow(
-                self.last_wind_field,
-                origin='lower',
-                cmap='coolwarm',
-                alpha=0.6,
-                extent=extent_km,
-                vmin=0,
-                vmax=35,
-            )
-            plt.colorbar(label='Wind speed [m/s]', shrink=0.7)
-
-        else:
-            print("No hay campo de viento disponible para graficar.")
-
-        # Convertir posiciones de buses a km 
+        # =================================================================
+        # CRÍTICO: ALINEACIÓN DEL SISTEMA DE COORDENADAS (Lat/Lon -> KM)
+        # =================================================================
         deg2km = 111.0
+        
+        # 1. Obtener límites de la MALLA DANA (fuente de verdad del mapa)
+        lon_min_dana, lon_max_dana = np.min(self.grid_lon), np.max(self.grid_lon)
+        lat_min_dana, lat_max_dana = np.min(self.grid_lat), np.max(self.grid_lat)
+        
+        # 2. Definir REFERENCIA ÚNICA: El centro de la malla DANA
+        lon_ref = np.mean([lon_min_dana, lon_max_dana])
+        lat_ref = np.mean([lat_min_dana, lat_max_dana])
+        
+        # 3. Conversión de la MALLA DANA a kilómetros (para el imshow)
+        x_km = (self.grid_lon - lon_ref) * deg2km * np.cos(np.radians(lat_ref))
+        y_km = (self.grid_lat - lat_ref) * deg2km
+        extent_km = [x_km.min(), x_km.max(), y_km.min(), y_km.max()]
+
+        # 4. Convertir posiciones de BUSES a kilómetros (USANDO LA MISMA REFERENCIA DANA)
         pos_km = {
             bus: (
+                # X (Longitud)
                 (v[0] - lon_ref) * deg2km * np.cos(np.radians(lat_ref)),
+                # Y (Latitud)
                 (v[1] - lat_ref) * deg2km,
             )
             for bus, v in pos.items()
         }
 
-        #  Dibujar red eléctrica
-        nx.draw_networkx_nodes(G, pos_km, node_color='skyblue', node_size=2, edgecolors='black')
+        
+        # ⚠️ Cambiamos el nombre del tercer campo a "Terrain + Flood"
+        fields = {
+            "Wind speed [m/s]": {"data": getattr(self, "last_wind_field", None), "cmap": "plasma", "vmin": 0, "vmax": 30},
+            "Rain intensity [mm/h]": {"data": getattr(self, "last_rain_field", None), "cmap": "Blues", "vmin": 0, "vmax": 80},
+            "Terrain + Flood [m]": {"data": self.terrain_normalized, "cmap": "YlGn", "vmin": 0, "vmax": 1} # Capa base
+        }
+        
+        # Crear figura con 3 subplots
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6), constrained_layout=True)
 
-        for lid, vals in self.lines.items():
-            bus0, bus1 = vals["bus0"], vals["bus1"]
-            if bus0 in pos_km and bus1 in pos_km:
-                x0, y0 = pos_km[bus0]
-                x1, y1 = pos_km[bus1]
-                plt.plot(
-                    [x0, x1], [y0, y1],
-                    color="green" if line_status.get(lid, 1) == 1 else "red",
-                    linewidth=0.8,
-                    linestyle="--" if line_status.get(lid, 1) == 0 else "-",
-                    alpha=0.8,
+        for i, (title, f_params) in enumerate(fields.items()):
+            ax = axes[i]
+            field = f_params["data"]
+            
+            if field is None:
+                ax.text(0.5, 0.5, f"No data for {title}", ha="center", va="center", color="gray")
+                ax.axis("off")
+                continue
+
+            # ----------------------------------------------------
+            # LÓGICA ESPECÍFICA PARA EL TERCER PLOT (TERRENO + INUNDACIÓN)
+            # ----------------------------------------------------
+            if title == "Terrain + Flood [m]":
+                # 1. Dibujar la capa base de Terreno (Elevación Normalizada)
+                im_terrain = ax.imshow(
+                    field,
+                    origin="lower",
+                    cmap=f_params["cmap"], # 'YlGn'
+                    extent=extent_km,
+                    vmin=0, vmax=1,
+                    alpha=0.9
                 )
+                
+                # Crear Colorbar para el Terreno
+                plt.colorbar(im_terrain, ax=ax, label='Elevación Normalizada (0=Bajo)', shrink=0.7)
+                
+                # 2. Superponer la Inundación (Flood Depth)
+                if hasattr(self, "last_flood_field") and self.last_flood_field is not None:
+                    flood_visual = np.where(self.last_flood_field > 0.05, self.last_flood_field, np.nan)
+                    im_flood = ax.imshow(
+                        flood_visual,
+                        origin="lower",
+                        cmap="Blues", # Mapa de color azul para el agua
+                        alpha=0.6,
+                        extent=extent_km,
+                        vmin=0.05,
+                        vmax=1.5,
+                    )
+                    # Colorbar para la Inundación (Depth)
+                    plt.colorbar(im_flood, ax=ax, label='Flood Depth [m]', shrink=0.7)
 
-        # -Formatear y guardar plots
-        plt.title(f"Network status - Hour {hour}")
-        plt.xlabel("Distancia Este–Oeste [km]")
-        plt.ylabel("Distancia Norte–Sur [km]")
-        plt.gca().set_aspect('equal', adjustable='box')
-        plt.grid(alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(f"figures/hour_{hour:02d}.png", dpi=200, bbox_inches="tight")
+            # LÓGICA GENERAL PARA OTROS PLOTS (Viento y Lluvia)
+            else:
+                im = ax.imshow(
+                    field,
+                    origin="lower",
+                    cmap=f_params["cmap"],
+                    alpha=0.75,
+                    extent=extent_km,
+                    vmin=f_params["vmin"],
+                    vmax=f_params["vmax"],
+                )
+                plt.colorbar(im, ax=ax, shrink=0.7)
+
+            # Dibujar red (igual para todos los subplots)
+            nx.draw_networkx_nodes(G, pos_km, node_color='skyblue', node_size=8, ax=ax, edgecolors='black')
+            for lid, vals in self.lines.items():
+                bus0, bus1 = vals["bus0"], vals["bus1"]
+                if bus0 in pos_km and bus1 in pos_km:
+                    x0, y0 = pos_km[bus0]
+                    x1, y1 = pos_km[bus1]
+                    ax.plot(
+                        [x0, x1], [y0, y1],
+                        color="green" if line_status.get(lid, 1) == 1 else "red",
+                        linewidth=0.8,
+                        linestyle="--" if line_status.get(lid, 1) == 0 else "-",
+                        alpha=0.8,
+                    )
+                    
+            # Formateo
+            ax.set_title(title, fontsize=12)
+            ax.set_xlabel("Distancia E-O [km]")
+            ax.set_ylabel("Distancia N-S [km]")
+            ax.set_aspect('equal', adjustable='box')
+
+
+        plt.suptitle(f"Red eléctrica y campos climáticos — hora {hour}", fontsize=14)
+        os.makedirs("figures", exist_ok=True)
+        plt.savefig(f"figures/hour_{hour:02d}_climate.png", dpi=200)
         plt.close()
