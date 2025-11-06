@@ -183,7 +183,7 @@ class FailureModel(mosaik_api.Simulator):
                 if i < len(lids):
                     lid = lids[i]
                     lp = self.line_positions[lid]
-                    P, max_v = self.compute_failure(lp['x0'], lp['y0'], lp['x1'], lp['y1'])
+                    P, max_v = self.compute_wind_failure(lp['x0'], lp['y0'], lp['x1'], lp['y1'])
                     if np.random.rand() < P:
                         status = 0  # fallo
                     else:

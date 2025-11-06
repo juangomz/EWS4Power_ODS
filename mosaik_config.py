@@ -6,9 +6,9 @@ importlib.reload(simuladores.Climate_model)
 
 
 SIM_CONFIG = {
-    'ClimateModel': {'python': 'simuladores.wind_sim:ClimateModel'},
-    'FailureModel': {'python': 'simuladores.failure_model:FailureModel'},
-    'PPModel': {'python': 'simuladores.pp_sim:PPModel'},
+    'ClimateModel': {'python': 'simuladores.Climate_model:ClimateModel'},
+    'FailureModel': {'python': 'simuladores.Failure_model:FailureModel'},
+    'PPModel': {'python': 'simuladores.PP_model:PPModel'},
     # 'PyPSA_Sim': {'python': 'simuladores.pypsa_sim:PyPSASim'},
 }
 
@@ -20,7 +20,7 @@ def main():
     grid = world.start('PPModel', time_resolution=3600)
 
     c = climate.ClimateModel.create(1)[0]
-    g = grid.Pandapower_Grid.create(1)[0]
+    g = grid.PPModel.create(1)[0]
 
     # Obtener line_positions del grid antes de la simulación
     grid_data = world.get_data({g: ['num_lines', 'line_positions']})
@@ -37,7 +37,7 @@ def main():
     
     # Cada modelo de fallo controla la red
     for f in failures:
-        world.connect(c, g, ('line_status', 'line_status'))
+        world.connect(f, g, ('line_status', 'line_status'))
 
     # El viento también alimenta al grid directamente
     world.connect(c, g, 'wind_speed', 'grid_x', 'grid_y', 'wind_shape')
