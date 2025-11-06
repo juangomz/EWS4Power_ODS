@@ -9,7 +9,7 @@ META = {
         'FailureModel': {
             'public': True,
             'params': ['line_positions'],  # ✅ ahora sí lo acepta
-            'attrs': ['wind_speed', 'line_status', 'wind_shape', 'grid_lon', 'grid_lat'],
+            'attrs': ['wind_speed', 'line_status', 'wind_shape', 'grid_x', 'grid_y'],
         },
     },
 }
@@ -20,8 +20,8 @@ class FailureModel(mosaik_api.Simulator):
         super().__init__(META)
         self.entities = {}  # Guardar estado de cada entidad
         self.wind_speed = 0
-        self.grid_lon = None
-        self.grid_lat = None
+        self.grid_x = None
+        self.grid_y = None
         self.wind_field = None
         self.wind_shape = None
         self.time = 0
@@ -48,7 +48,18 @@ class FailureModel(mosaik_api.Simulator):
     # ============================================================
     # Interpolación bilineal simple
     def interp2_bilinear(self, x, y):
-        gx, gy, f = self.grid_lon, self.grid_lat, self.wind_field
+        """
+        Obtains value of the map interpolating betwwen existing 
+        values of the map's grid.
+
+        Args:
+            x: x position
+            y: y position
+
+        Returns:
+            Value of the map in the position interpolated
+        """
+        gx, gy, f = self.grid_x, self.grid_y, self.wind_field
         ny, nx = f.shape
 
         # limitar coordenadas dentro de la malla
@@ -78,17 +89,47 @@ class FailureModel(mosaik_api.Simulator):
 
     # ============================================================
     # Muestra viento a lo largo de una línea y calcula fallo
-    def compute_failure(self, x0, y0, x1, y1,
+    def compute_wind_failure(self, x0, y0, x1, y1,
                     v_th_mean=18.0, alpha_mean=0.0006, beta_mean=3.0,
                     sigma_vth=2, sigma_alpha=0.0002, sigma_beta=0.4):
         """
         Modelo de fallo exponencial (Weibull-like) con dispersión en parámetros.
         Devuelve probabilidad de fallo y velocidad máxima observada en el tramo.
+
+        Args:
+            x0: x position of bus 0
+            y0: y poosition of bus 0
+            x1: x position of bus 1
+            y1: y position of bus 1
+            v_th_mean: Mean wind damage threshold. Defaults to 18.0.
+            alpha_mean: mean damage threshold. Defaults to 0.0006.
+            beta_mean: _description_. Defaults to 3.0.
+            sigma_vth: _description_. Defaults to 2.
+            sigma_alpha: _description_. Defaults to 0.0002.
+            sigma_beta: _description_. Defaults to 0.4.
+
+        Returns:
+            Probability of failure of the line, Max velocity suffered by the line
         """
 
         n = 10
-        xs = np.linspace(x0, x1, n)
-        ys = np.linspace(y0, y1, n)
+        FT_TO_KM = 0.0003048
+        xs = np.linspace(x0, x1, n) * FT_TO_KM
+        ys = np.linspace(y0, y1, n) * FT_TO_KM
+        
+        # Centrar igual que en PandapowerSim
+        if not hasattr(self, "x_center"):
+            # calcular el centro una sola vez a partir de todas las líneas
+            all_x = [lp['x0'] * FT_TO_KM for lp in self.line_positions.values()] + \
+                    [lp['x1'] * FT_TO_KM for lp in self.line_positions.values()]
+            all_y = [lp['y0'] * FT_TO_KM for lp in self.line_positions.values()] + \
+                    [lp['y1'] * FT_TO_KM for lp in self.line_positions.values()]
+            self.x_center = np.mean(all_x)
+            self.y_center = np.mean(all_y)
+
+        xs -= self.x_center
+        ys -= self.y_center
+    
         vals = [self.interp2_bilinear(x, y) for x, y in zip(xs, ys)]
         max_v = float(np.max(vals))
 
@@ -126,10 +167,10 @@ class FailureModel(mosaik_api.Simulator):
                         self.wind_field = self.wind_field.reshape(self.wind_shape)
             if 'line_positions' in vals:
                 self.line_positions = list(vals['line_positions'].values())[0]
-            if 'grid_lon' in vals:
-                self.grid_lon = np.array(list(vals['grid_lon'].values())[0])
-            if 'grid_lat' in vals:
-                self.grid_lat = np.array(list(vals['grid_lat'].values())[0])
+            if 'grid_x' in vals:
+                self.grid_x = np.array(list(vals['grid_x'].values())[0])
+            if 'grid_y' in vals:
+                self.grid_y = np.array(list(vals['grid_y'].values())[0])
             if 'wind_shape' in vals:
                 self.wind_shape = tuple(list(vals['wind_shape'].values())[0])
 

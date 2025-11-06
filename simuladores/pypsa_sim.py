@@ -170,6 +170,7 @@ class PyPSASim(mosaik_api.Simulator):
                                     x=params["x"],
                                     r=params["r"],
                                     s_nom=params["s_nom"])
+       
 
         # Flujo de potencia y BODF
         # Inicializar BODF una sola vez (flujo base)
@@ -247,7 +248,7 @@ class PyPSASim(mosaik_api.Simulator):
             self._last_active_lines = current_active.copy()
         else:
             print("⏸️ Sin cambios topológicos → se omite recalculo de flujo.")
-
+            
         # Calculo de Corriente REVISAR!!!
         currents = {}
         for lid, line in self.network.lines.iterrows():
@@ -258,8 +259,10 @@ class PyPSASim(mosaik_api.Simulator):
                 currents[lid] = round(i, 3)
             except (KeyError, IndexError):
                 currents[lid] = 0.0
+    
 
         # Caluclo de ENS
+
         G = self.network.graph()
         expected_load = abs(self.network.loads["p_set"]).sum()
         actual_load = 0.0
@@ -280,6 +283,7 @@ class PyPSASim(mosaik_api.Simulator):
         ens = max(0.0, expected_load - actual_load)
 
         print(f"Expected Load = {expected_load:.2f}, ENS = {ens:.2f}")
+        
         print("guardando plots...")
         self.plot_network(hour, self.line_status_memory)
 
