@@ -43,7 +43,6 @@ class PPModel(mosaik_api.Simulator):
         self.lines = {}
         self.line_status_memory = {}
         self.current = {}
-        self.failure_map = {}
 
     # ==============================================================
     # SETUP
@@ -178,12 +177,6 @@ class PPModel(mosaik_api.Simulator):
         print("📡 Recibido network_data desde mosaik_config.py")
         self.setup_network()
 
-        # Mapeo para el modelo de fallos
-        self.failure_map = {
-            f"FailureModel-0.FailureProc_{i}": lid
-            for i, lid in enumerate(self.lines.keys())
-        }
-
         self.current = {
             'ens': 0.0,
             'num_lines': len(self.net.line),
@@ -225,9 +218,9 @@ class PPModel(mosaik_api.Simulator):
 
         # Actualizar líneas según el modelo de fallo
         for src_id, status in line_status_inputs.items():
-            line_id = self.failure_map.get(src_id)
-            if line_id is not None:
-                self.line_status_memory[line_id] = int(status)
+            line_dict = line_status_inputs[src_id]
+            if line_dict is not None:
+                self.line_status_memory = line_dict
 
         # Aplicar estado de línea
         for i, (lid, status) in enumerate(self.line_status_memory.items()):
@@ -320,13 +313,107 @@ class PPModel(mosaik_api.Simulator):
             }
         }
 
-    def plot_network(self, hour):
-        """
-        Plots the network over the weather, showing failed components
+    # def plot_network(self, hour):
+    #     """
+    #     Plots the network over the weather, showing failed components
 
-        Args:
-            hour: instant of the simulation (h)
-        """
+    #     Args:
+    #         hour: instant of the simulation (h)
+    #     """
+    #     import matplotlib.pyplot as plt
+    #     import networkx as nx
+    #     import numpy as np
+    #     import pandapower.topology as top
+    #     import os
+
+    #     plt.figure(figsize=(8, 6))
+    #     net = self.net
+
+    #     # Crear grafo
+    #     G = top.create_nxgraph(net)
+
+    #     # Conversión de pies → kilómetros
+    #     FT_TO_KM = 0.0003048
+    #     pos_km = {
+    #         bus: (
+    #             float(net.bus.at[bus, "x"]) * FT_TO_KM,
+    #             float(net.bus.at[bus, "y"]) * FT_TO_KM,
+    #         )
+    #         for bus in net.bus.index
+    #     }
+
+    #     # Centrar figura (coincide con el dominio del viento)
+    #     x_vals = [v[0] for v in pos_km.values()]
+    #     y_vals = [v[1] for v in pos_km.values()]
+    #     x_mean, y_mean = np.mean(x_vals), np.mean(y_vals)
+    #     pos_km = {b: (x - x_mean, y - y_mean) for b, (x, y) in pos_km.items()}
+
+    #     # ==========================
+    #     # PLOT DEL VIENTO
+    #     # ==========================
+    #     if hasattr(self, "last_wind_field") and isinstance(self.last_wind_field, np.ndarray):
+    #         # Recuperar grilla de viento
+    #         if hasattr(self, "grid_x") and hasattr(self, "grid_y"):
+    #             X, Y = np.meshgrid(self.grid_x, self.grid_y)
+    #         elif hasattr(self, "wind_grid_lon") and hasattr(self, "wind_grid_lat"):
+    #             # Compatibilidad con nombres antiguos
+    #             X, Y = np.meshgrid(self.wind_grid_lon, self.wind_grid_lat)
+    #         else:
+    #             X, Y = None, None
+
+    #         if X is not None and Y is not None:
+    #             extent = [
+    #                 X.min(), X.max(),
+    #                 Y.min(), Y.max(),
+    #             ]
+    #             plt.imshow(
+    #                 self.last_wind_field,
+    #                 origin="lower",
+    #                 cmap="coolwarm",
+    #                 alpha=0.5,
+    #                 extent=extent,
+    #                 vmin=0,
+    #                 vmax=np.max(self.last_wind_field),
+    #             )
+    #             plt.colorbar(label="Velocidad del viento [m/s]", shrink=0.7)
+    #         else:
+    #             print("⚠️ No hay malla de viento (X, Y) para graficar.")
+    #     else:
+    #         print("⚠️ No hay campo de viento disponible para graficar.")
+
+    #     # ==========================
+    #     # PLOT DE LA RED
+    #     # ==========================
+    #     nx.draw_networkx_nodes(G, pos_km, node_color="skyblue", node_size=8, edgecolors="black")
+
+    #     for lid in net.line.index:
+    #         bus0 = net.line.at[lid, "from_bus"]
+    #         bus1 = net.line.at[lid, "to_bus"]
+    #         if bus0 in pos_km and bus1 in pos_km:
+    #             x0, y0 = pos_km[bus0]
+    #             x1, y1 = pos_km[bus1]
+    #             plt.plot(
+    #                 [x0, x1], [y0, y1],
+    #                 color="green" if self.line_status_memory.get(lid, 1) == 1 else "red",
+    #                 linewidth=0.8,
+    #                 linestyle="--" if self.line_status_memory.get(lid, 1) == 0 else "-",
+    #                 alpha=0.8,
+    #             )
+
+    #     # ==========================
+    #     # FORMATO FINAL
+    #     # ==========================
+    #     plt.title(f"IEEE123 - Estado de la red + viento (t = {hour} h)")
+    #     plt.xlabel("Distancia Este–Oeste [km]")
+    #     plt.ylabel("Distancia Norte–Sur [km]")
+    #     plt.gca().set_aspect("equal", adjustable="box")
+    #     plt.grid(alpha=0.3)
+    #     plt.tight_layout()
+
+    #     os.makedirs("figures", exist_ok=True)
+    #     plt.savefig(f"figures/hour_{hour:02d}.png", dpi=200, bbox_inches="tight")
+    #     plt.close()
+    def plot_network(self, hour):
         import matplotlib.pyplot as plt
         import networkx as nx
         import numpy as np
@@ -359,20 +446,15 @@ class PPModel(mosaik_api.Simulator):
         # PLOT DEL VIENTO
         # ==========================
         if hasattr(self, "last_wind_field") and isinstance(self.last_wind_field, np.ndarray):
-            # Recuperar grilla de viento
             if hasattr(self, "grid_x") and hasattr(self, "grid_y"):
                 X, Y = np.meshgrid(self.grid_x, self.grid_y)
             elif hasattr(self, "wind_grid_lon") and hasattr(self, "wind_grid_lat"):
-                # Compatibilidad con nombres antiguos
                 X, Y = np.meshgrid(self.wind_grid_lon, self.wind_grid_lat)
             else:
                 X, Y = None, None
 
             if X is not None and Y is not None:
-                extent = [
-                    X.min(), X.max(),
-                    Y.min(), Y.max(),
-                ]
+                extent = [X.min(), X.max(), Y.min(), Y.max()]
                 plt.imshow(
                     self.last_wind_field,
                     origin="lower",
@@ -389,9 +471,51 @@ class PPModel(mosaik_api.Simulator):
             print("⚠️ No hay campo de viento disponible para graficar.")
 
         # ==========================
+        # 💡 COLOREAR LOS BUSES SEGÚN SI ESTÁN ENERGIZADOS
+        # ==========================
+        slack_bus_idx = int(net.ext_grid.bus.values[0]) if len(net.ext_grid.bus) > 0 else None
+
+        node_colors = []
+        node_sizes = []
+        for bus in net.bus.index:
+            if bus in net.res_bus.index:
+                vm = net.res_bus.at[bus, "vm_pu"]
+                if np.isnan(vm) or vm < 0.1:
+                    color = "red"
+                else:
+                    color = "skyblue"
+            else:
+                color = "red"
+
+            # 💡 Marcar el bus generador (slack)
+            if bus == slack_bus_idx:
+                color = "limegreen"  # verde brillante
+                size = 80            # más grande
+            else:
+                size = 20
+
+            node_colors.append(color)
+            node_sizes.append(size)
+            
+        # === Etiquetas de buses (número o nombre) ===
+        labels = {bus: str(bus) for bus in net.bus.index}
+
+        # Si usas nombres en lugar de índices:
+        # labels = {bus: str(net.bus.at[bus, "name"]) for bus in net.bus.index}
+
+        nx.draw_networkx_labels(
+            G,
+            pos_km,
+            labels=labels,
+            font_size=6,         # tamaño pequeño para no saturar
+            font_color="black",  # o "darkgreen" si prefieres sobre el fondo
+            verticalalignment="center",
+            horizontalalignment="center"
+)
+        # ==========================
         # PLOT DE LA RED
         # ==========================
-        nx.draw_networkx_nodes(G, pos_km, node_color="skyblue", node_size=8, edgecolors="black")
+        nx.draw_networkx_nodes(G, pos_km, node_color=node_colors, node_size=8, edgecolors="black")
 
         for lid in net.line.index:
             bus0 = net.line.at[lid, "from_bus"]
@@ -406,6 +530,20 @@ class PPModel(mosaik_api.Simulator):
                     linestyle="--" if self.line_status_memory.get(lid, 1) == 0 else "-",
                     alpha=0.8,
                 )
+                
+        # Opcional: etiqueta el generador
+        if slack_bus_idx is not None:
+            x_slack, y_slack = pos_km[slack_bus_idx]
+            plt.text(
+                x_slack, y_slack + 0.02,
+                "GEN",
+                color="green",
+                fontsize=9,
+                ha="center",
+                va="bottom",
+                fontweight="bold",
+                bbox=dict(facecolor="white", alpha=0.6, edgecolor="none", boxstyle="round,pad=0.2")
+            )
 
         # ==========================
         # FORMATO FINAL
@@ -420,3 +558,4 @@ class PPModel(mosaik_api.Simulator):
         os.makedirs("figures", exist_ok=True)
         plt.savefig(f"figures/hour_{hour:02d}.png", dpi=200, bbox_inches="tight")
         plt.close()
+

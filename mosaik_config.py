@@ -9,6 +9,7 @@ SIM_CONFIG = {
     'ClimateModel': {'python': 'simuladores.Climate_model:ClimateModel'},
     'FailureModel': {'python': 'simuladores.Failure_model:FailureModel'},
     'PPModel': {'python': 'simuladores.PP_model:PPModel'},
+    'OpDecisionModel': {'python': 'simuladores.Op_Decision_model:OpDecisionModel'}
     # 'PyPSA_Sim': {'python': 'simuladores.pypsa_sim:PyPSASim'},
 }
 
@@ -17,10 +18,13 @@ def main():
 
     climate = world.start('ClimateModel', time_resolution=3600)
     failure = world.start('FailureModel', time_resolution=3600)
+    decision = world.start('OpDecisionModel', time_resolution=3600)
     grid = world.start('PPModel', time_resolution=3600)
+    
 
     c = climate.ClimateModel.create(1)[0]
     g = grid.PPModel.create(1)[0]
+
 
     # Obtener line_positions del grid antes de la simulación
     grid_data = world.get_data({g: ['num_lines', 'line_positions']})
@@ -28,16 +32,18 @@ def main():
     line_positions = list(grid_data.values())[0]['line_positions']
 
     # Pasa line_positions como parámetro
-    failures = failure.FailureModel.create(num_lines, line_positions=line_positions)
-        
+    f = failure.FailureModel.create(1, line_positions=line_positions)[0]
+    d = decision.OpDecisionModel.create(1)[0]
     # --- Conexiones ---
     # El viento alimenta a todos los modelos de fallo
-    for f in failures:
-        world.connect(c, f, 'wind_speed', 'grid_x', 'grid_y', 'wind_shape')
+    world.connect(c, f, 'wind_speed', 'grid_x', 'grid_y', 'wind_shape')
     
     # Cada modelo de fallo controla la red
-    for f in failures:
-        world.connect(f, g, ('line_status', 'line_status'))
+    # for f in failures:
+    #     world.connect(f, g, ('line_status', 'line_status'))
+    world.connect(f, d, 'line_status', 'line_status')
+        
+    world.connect(d, g, 'line_status', 'line_status')
 
     # El viento también alimenta al grid directamente
     world.connect(c, g, 'wind_speed', 'grid_x', 'grid_y', 'wind_shape')
