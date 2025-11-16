@@ -11,6 +11,8 @@ from simuladores.logger import Logger
 import json
 import pandapower.converter as pc
 
+np.random.seed(42)   # cualquier número fijo
+
 data_dir = './data/red_electrica'
 
 META = {
@@ -21,13 +23,15 @@ META = {
             'public': True,
             'params': [],
             'attrs': [
-                'line_status',
-                'wind_speed',
-                'ens',
+                'line_status', # PPModel output
+                'fail_prob', # FailureModel input
+                'repair_plan', # OpDecisionModel input
+                'gust_speed', # ClimateModel input
+                'ens', # PPModel output (evaluation)
                 'line_positions',
                 'grid_x',
                 'grid_y',
-                'wind_shape',
+                'shape',
             ],
         }
     },
@@ -39,10 +43,34 @@ class PPModel(mosaik_api.Simulator):
         super().__init__(META)
         self.eid = 'Grid'
         self.net = pp.create_empty_network()
+        self.line_status = {}
+        self.fail_prob = {}
+        self.repair_plan = {}
         self.logger = Logger("results/results.csv")
         self.lines = {}
-        self.line_status_memory = {}
-        self.current = {}
+        self.current_metrics = {}
+        self.t = 0
+        self.R_curve = {}
+        
+    # =============================================================
+    # INITIALIZATION
+    # =============================================================
+        
+    def init(self, sid, **sim_params):
+        print("[PPModel] Inicializando simulador de red...")
+        return META
+    
+    def create(self, num, model):
+        """Crea entidad de red y configura topología."""
+        print("📡 Recibido network_data desde mosaik_config.py")
+        self.setup_network()
+
+        self.current_metrics = {
+            'ens': 0.0,
+            'R_curve': self.R_curve
+        }
+
+        return [{'eid': self.eid, 'type': model, 'rel': []}]
 
     # ==============================================================
     # SETUP
@@ -69,12 +97,11 @@ class PPModel(mosaik_api.Simulator):
         )
         loads_xls['Node']   = loads_xls['Node'].astype(str).str.strip()
 
-        coords = pd.read_csv("feeder123/BusCoords.dat", header=None, sep=r"[,\s]+", engine="python")
+        coords = pd.read_csv("feeder123/BusCoords.csv", header=None, sep=r"[;\s]+", engine="python", decimal=',')
         coords.columns = ["bus", "x", "y"]
         coords["bus"] = coords["bus"].astype(str).str.strip()
 
-        bus_names = pd.unique(lines_xls[['Node A', 'Node B']].values.ravel('K'))
-        for name in bus_names:
+        for name in coords["bus"]:
             pp.create_bus(self.net, vn_kv=4.16, name=str(name))
 
         for _, r in coords.iterrows():
@@ -87,37 +114,56 @@ class PPModel(mosaik_api.Simulator):
         # === Crear líneas ===
         for _, row in lines_xls.iterrows():
             try:
-                bus0 = self.net.bus[self.net.bus.name == str(row['Node A']).strip()].index[0]
-                bus1 = self.net.bus[self.net.bus.name == str(row['Node B']).strip()].index[0]
+                bus0 = int(row['Node A'].strip())
+                bus1 = int(row['Node B'].strip())
+                
+                busA = self.net.bus[self.net.bus["name"] == str(bus0)].index[0]
+                busB = self.net.bus[self.net.bus["name"] == str(bus1)].index[0]
+                
                 length_km = row['Length (ft.)'] * 0.0003048 # pasar de pies a km
 
                 cfg = str(row['Config.']).strip()
-                # valores aproximados si no hay impedancias detalladas
-                if 'ug' in cfg.lower():
-                    r_ohm_per_km, x_ohm_per_km = 0.6, 0.08
-                elif 'oh' in cfg.lower() or 'a' in cfg.lower():
-                    r_ohm_per_km, x_ohm_per_km = 0.4, 0.05
-                else:
-                    r_ohm_per_km, x_ohm_per_km = 0.5, 0.06
+                cfg_map = {
+                    1: (0.4, 0.05),
+                    2: (0.5, 0.06),
+                    3: (0.6, 0.08),
+                    4: (0.4, 0.05),
+                    5: (0.5, 0.06),
+                    6: (0.5, 0.07),
+                    7: (0.4, 0.05),
+                    8: (0.5, 0.06),
+                    9: (0.4, 0.05),
+                    10: (0.5, 0.06),
+                    11: (0.4, 0.05),
+                    12: (0.4, 0.05),
+                }
+
+                r_ohm_per_km, x_ohm_per_km = cfg_map.get(cfg, (0.5, 0.06))
+
+                name = f"Line_{row['Node A']}_{row['Node B']}"
 
                 pp.create_line_from_parameters(
-                    self.net, from_bus=bus0, to_bus=bus1,
+                    self.net,
+                    from_bus=busA,     # ← SIEMPRE Node A
+                    to_bus=busB,       # ← SIEMPRE Node B
                     length_km=length_km,
-                    r_ohm_per_km=r_ohm_per_km, x_ohm_per_km=x_ohm_per_km,
-                    c_nf_per_km=0.0, max_i_ka=0.2,
-                    name=f"Line_{row['Node A']}_{row['Node B']}"
+                    r_ohm_per_km=r_ohm_per_km,
+                    x_ohm_per_km=x_ohm_per_km,
+                    c_nf_per_km=0.0,
+                    max_i_ka=0.2,
+                    name=name
                 )
             except Exception as e:
                 print(f"⚠️  Error creando línea {row.get('Node A', '?')}-{row.get('Node B', '?')}: {e}")
                 
         # Punetes entre ramas desconectadas
         bridge_pairs = [
-            ("18", "35"),    # 18–35r–35  → 18–35
-            ("45", "52"),    # 45–52r–52  → 45–52
-            ("61", "67"),    # 61s/61r–67r–67  → 61–67
-            ("97", "101"),   # 97–101r–101
-            ("150", "1"),    # fuente principal
-            ("160", "67"),   # subrama media
+            ("18", "135"),
+            ("13", "152"),
+            ("54", "94"),
+            ("151", "300"),
+            ("97", "197"),
+            ("60", "160"),
         ]
 
         # Incluir puentes en la red
@@ -125,14 +171,16 @@ class PPModel(mosaik_api.Simulator):
             if a in self.net.bus.name.values and b in self.net.bus.name.values:
                 bus_a = self.net.bus[self.net.bus.name == a].index[0]
                 bus_b = self.net.bus[self.net.bus.name == b].index[0]
-                pp.create_line_from_parameters(
-                    self.net, from_bus=bus_a, to_bus=bus_b,
-                    length_km=0.001,     # línea corta (≈ 1 m)
-                    r_ohm_per_km=0.0001, # resistencia casi nula
-                    x_ohm_per_km=0.0001,
-                    c_nf_per_km=0.0,
-                    max_i_ka=1.0,
-                    name=f"Bridge_{a}_{b}"
+                if int(a) in (13,18, 54, 151):
+                    closed = True
+                else:
+                    closed = False
+                pp.create_switch(
+                    self.net,
+                    bus=bus_a,
+                    element=bus_b,
+                    et="b",
+                    closed=closed
                 )
                 print(f"🔗 Puente añadido entre {a} y {b}")
 
@@ -148,42 +196,33 @@ class PPModel(mosaik_api.Simulator):
                 pp.create_load(self.net, bus=bus_idx, p_mw=p_kw / 1000, name=f"Load_{bus_name}")
             except Exception as e:
                 print(f"⚠️  Error creando carga en {bus_name}: {e}")
+                
+        if "150" not in self.net.bus["name"].values:
+            b150 = pp.create_bus(self.net, vn_kv=4.16, name="150")
+            self.net.bus.at[b150, "x"] = 100
+            self.net.bus.at[b150, "y"] = 1500
 
+        # 2. Índices de buses por nombre (OJO: strings)
+        bus150_idx = self.net.bus[self.net.bus.name == "150"].index[0]
+        bus149_idx = self.net.bus[self.net.bus.name == "149"].index[0]
+
+        # 3. Switch bus–bus entre 150 y 149
+        pp.create_switch(
+            self.net,
+            bus=bus150_idx,
+            element=bus149_idx,
+            et="b",      # bus-bus switch
+            closed=True
+        )
+        
         # === Crear barra slack ===
-        slack_bus = self.net.bus[self.net.bus.name == '150'].index[0] if '150' in self.net.bus.name.values else self.net.bus.index[0]
-        pp.create_ext_grid(self.net, bus=slack_bus, vm_pu=1.0, name="Source")
+        pp.create_ext_grid(self.net, bus=bus150_idx, vm_pu=1.0)
         
         self.lines = dict(zip(self.net.line.index, self.net.line.name))
-        self.line_status_memory = {lid: 1 for lid in self.lines.keys()}
+        self.line_status = {lid: 1 for lid in self.lines.keys()}
 
         print(f"✅ Red creada: {len(self.net.bus)} buses, {len(self.net.line)} líneas, {len(self.net.load)} cargas.")
-        
-        print(
-            f"✅ Red cargada: {len(self.net.bus)} buses, "
-            f"{len(self.net.line)} líneas, "
-            f"{len(self.net.load)} cargas, "
-            f"{len(self.net.gen)} generadores."
-        )
-
-    # ==============================================================
-    # MOSAIK HOOKS
-    # ==============================================================
-
-    def init(self, sid, **sim_params):
-        return META
-
-    def create(self, num, model):
-        """Crea entidad de red y configura topología."""
-        print("📡 Recibido network_data desde mosaik_config.py")
-        self.setup_network()
-
-        self.current = {
-            'ens': 0.0,
-            'num_lines': len(self.net.line),
-            'currents': {lid: 0.0 for lid in self.lines.keys()}
-        }
-
-        return [{'eid': self.eid, 'type': model, 'rel': []}]
+    
 
     # ==============================================================
     # SIMULATION STEP
@@ -191,74 +230,102 @@ class PPModel(mosaik_api.Simulator):
 
     def step(self, time, inputs, max_advance):
         print("\n==============================")
-        hour = int(time / 3600)
-        print(f"⏱️  STEP t = {hour} h")
+        self.t = int(time / 3600)
+        print(f"⏱️  STEP t = {self.t} h")
 
-        # Leer entradas
-        wind_speed = 0
-        line_status_inputs = {}
+        # Read inputs
+        fail_prob = None
+        repair_plan = None
+        gust_speed = 0
 
         if inputs:
             src = list(inputs.keys())[0]
             vals = inputs[src]
+            
+            if 'fail_prob' in vals:
+                fail_prob = list(vals['fail_prob'].values())[0]
+                self.fail_prob = fail_prob
+                
+            if 'repair_plan' in vals:
+                repair_plan = list(vals['repair_plan'].values())[0]
+                self.repair_plan = repair_plan
+            
+            for lid, prob in self.fail_prob.items():
+                if self.line_status.get(lid,1) == 1 and np.random.rand() < prob:
+                    self.line_status[lid] = 0
+                    
+            for lid, data in self.repair_plan.items():
+                if data.get('finish_time',0) <= self.t * 3600:
+                    self.line_status[lid] = 1
 
-            if 'wind_speed' in vals:
-                wind_speed = list(vals['wind_speed'].values())[0]
-                self.last_wind_field = np.array(wind_speed)
+            if 'gust_speed' in vals:
+                gust_speed = list(vals['gust_speed'].values())[0]
+                self.last_gust_speed = np.array(gust_speed)
 
             if 'grid_x' in vals:
                 self.grid_x = np.array(list(vals['grid_x'].values())[0])
             if 'grid_y' in vals:
                 self.grid_y = np.array(list(vals['grid_y'].values())[0])
-            if 'wind_shape' in vals:
-                self.wind_shape = tuple(list(vals['wind_shape'].values())[0])
-
-            if 'line_status' in vals:
-                line_status_inputs = vals['line_status']
+            if 'shape' in vals:
+                self.shape = tuple(list(vals['shape'].values())[0])
 
         # Actualizar líneas según el modelo de fallo
-        for src_id, status in line_status_inputs.items():
-            line_dict = line_status_inputs[src_id]
-            if line_dict is not None:
-                self.line_status_memory = line_dict
-
-        # Aplicar estado de línea
-        for i, (lid, status) in enumerate(self.line_status_memory.items()):
-            self.net.line.at[i, 'in_service'] = bool(status)
+        for lid, status in self.line_status.items():
+            self.net.line.at[lid, 'in_service'] = bool(status)
 
         # Calcular flujo DC
         try:
-            pp.rundcpp(self.net)
+            pp.runpp(self.net)
+            # pp.rundcpp(self.net)
             print("✅ DC power flow calculado correctamente.")
+            
+            # Calcular ENS topológica
+            expected_load = self.net.load.p_mw.sum()
+            served_load = self.net.res_load.p_mw.sum()
+            R = served_load/expected_load
+            self.R_curve[self.t] = R
+            
+            ens = max(0.0, expected_load - served_load)
+            print(f"Expected: {expected_load:.3f} MW, Served: {served_load:.3f} MW, ENS: {ens:.3f} MW")
+            
         except Exception as e:
+            ens = self.net.load.p_mw.sum()
             print(f"⚠️ Error en rundcpp: {e}")
             return time + 3600
 
-        # Calcular corriente aproximada por línea
-        currents = {}
-        for i, row in self.net.res_line.iterrows():
-            currents[i] = row.loading_percent / 100.0
-
-        # Calcular ENS topológica
-        expected_load = self.net.load.p_mw.sum()
-        served_load = self.net.res_load.p_mw.sum()
-
-        ens = max(0.0, expected_load - served_load)
-        print(f"Expected: {expected_load:.3f} MW, Served: {served_load:.3f} MW, ENS: {ens:.3f} MW")
-
         # Guardar resultados y plot
-        os.makedirs("results", exist_ok=True)
-        self.save_results(hour, wind_speed, ens)
-        self.plot_network(hour)
+        # os.makedirs("results", exist_ok=True)
+        # self.save_results(self.t, wind_speed, ens)
+        self.plot_network(self.t)
+        
+        if time >= (24 * 3600) - 3600:
+            # último paso de simulación
+            self.plot_R_curve()
 
         # Preparar salida
-        self.current = {
+        self.current_metrics = {
             'ens': ens,
-            'currents': currents,
-            'num_lines': len(self.net.line)
+            'R_curve': self.R_curve
         }
 
         return time + 3600
+    
+    def plot_R_curve(self):
+        import matplotlib.pyplot as plt, os
+        R = self.current_metrics.get("R_curve", {})
+        if not R:
+            return
+        times = list(R.keys())
+        values = [float(v) for v in R.values()]
+        os.makedirs("results", exist_ok=True)
+        plt.plot(times, values, marker="o")
+        plt.title("Curva de Resiliencia R(t)")
+        plt.xlabel("Hora")
+        plt.ylabel("R(t)")
+        plt.grid(alpha=0.4)
+        plt.savefig("results/R_curve.png", dpi=200)
+        plt.close()
+        print("📈 Guardada R_curve en results/R_curve.png")
 
     # ==============================================================
     # UTILIDADES
@@ -272,7 +339,7 @@ class PPModel(mosaik_api.Simulator):
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             row = {"hour": hour, "wind_speed": wind_speed, "ens": ens}
-            row.update({str(l): self.line_status_memory.get(l, 1) for l in self.lines.keys()})
+            row.update({str(l): self.line_status.get(l, 1) for l in self.lines.keys()})
             writer.writerow(row)
 
     def get_data(self, outputs=None):
@@ -306,20 +373,14 @@ class PPModel(mosaik_api.Simulator):
 
         return {
             self.eid: {
-                'ens': self.current.get('ens', 0.0),
-                'currents': self.current.get('currents', {}),
-                'num_lines': len(self.net.line),
+                'ens': self.current_metrics.get('ens', 0.0),
+                # 'num_lines': len(self.net.line),
                 'line_positions': line_pos,
+                'line_status': self.line_status
             }
         }
 
     # def plot_network(self, hour):
-    #     """
-    #     Plots the network over the weather, showing failed components
-
-    #     Args:
-    #         hour: instant of the simulation (h)
-    #     """
     #     import matplotlib.pyplot as plt
     #     import networkx as nx
     #     import numpy as np
@@ -351,29 +412,24 @@ class PPModel(mosaik_api.Simulator):
     #     # ==========================
     #     # PLOT DEL VIENTO
     #     # ==========================
-    #     if hasattr(self, "last_wind_field") and isinstance(self.last_wind_field, np.ndarray):
-    #         # Recuperar grilla de viento
+    #     if hasattr(self, "last_gust_speed") and isinstance(self.last_gust_speed, np.ndarray):
     #         if hasattr(self, "grid_x") and hasattr(self, "grid_y"):
     #             X, Y = np.meshgrid(self.grid_x, self.grid_y)
     #         elif hasattr(self, "wind_grid_lon") and hasattr(self, "wind_grid_lat"):
-    #             # Compatibilidad con nombres antiguos
     #             X, Y = np.meshgrid(self.wind_grid_lon, self.wind_grid_lat)
     #         else:
     #             X, Y = None, None
 
     #         if X is not None and Y is not None:
-    #             extent = [
-    #                 X.min(), X.max(),
-    #                 Y.min(), Y.max(),
-    #             ]
+    #             extent = [X.min(), X.max(), Y.min(), Y.max()]
     #             plt.imshow(
-    #                 self.last_wind_field,
+    #                 self.last_gust_speed,
     #                 origin="lower",
     #                 cmap="coolwarm",
     #                 alpha=0.5,
     #                 extent=extent,
     #                 vmin=0,
-    #                 vmax=np.max(self.last_wind_field),
+    #                 vmax=30,
     #             )
     #             plt.colorbar(label="Velocidad del viento [m/s]", shrink=0.7)
     #         else:
@@ -382,9 +438,54 @@ class PPModel(mosaik_api.Simulator):
     #         print("⚠️ No hay campo de viento disponible para graficar.")
 
     #     # ==========================
+    #     # 💡 COLOREAR LOS BUSES SEGÚN SI ESTÁN ENERGIZADOS
+    #     # ==========================
+    #     slack_bus_idx = int(net.ext_grid.bus.values[0]) if len(net.ext_grid.bus) > 0 else None
+
+    #     node_colors = []
+    #     node_sizes = []
+    #     for bus in net.bus.index:
+    #         if bus in net.res_bus.index:
+    #             vm = net.res_bus.at[bus, "vm_pu"]
+    #             if np.isnan(vm) or vm < 0.1:
+    #                 color = "red"
+    #             else:
+    #                 color = "skyblue"
+    #         else:
+    #             color = "red"
+
+    #         # 💡 Marcar el bus generador (slack)
+    #         if bus == slack_bus_idx:
+    #             color = "limegreen"  # verde brillante
+    #             size = 80            # más grande
+    #         else:
+    #             size = 20
+
+    #         node_colors.append(color)
+    #         node_sizes.append(size)
+
+    #     # # Si usas nombres en lugar de índices:
+    #     # labels = {bus: str(net.bus.at[bus, "name"]) for bus in net.bus.index}
+        
+    #     # pos = pos_km  # o el nombre que uses para tu dict de posiciones
+        
+    #     # # Creamos las posiciones desplazadas para las etiquetas
+    #     # label_pos = {node: (pos[node][0], pos[node][1] + 0.05) for node in pos}
+
+    #     # nx.draw_networkx_labels(
+    #     #     G,
+    #     #     label_pos,
+    #     #     labels=labels,
+    #     #     font_size=3,         # tamaño pequeño para no saturar
+    #     #     font_color="black",  # o "darkgreen" si prefieres sobre el fondo
+    #     #     verticalalignment="center",
+    #     #     horizontalalignment="center"
+    #     # )
+        
+    #     # ==========================
     #     # PLOT DE LA RED
     #     # ==========================
-    #     nx.draw_networkx_nodes(G, pos_km, node_color="skyblue", node_size=8, edgecolors="black")
+    #     nx.draw_networkx_nodes(G, pos_km, node_color=node_colors, node_size=8, edgecolors="black")
 
     #     for lid in net.line.index:
     #         bus0 = net.line.at[lid, "from_bus"]
@@ -394,12 +495,46 @@ class PPModel(mosaik_api.Simulator):
     #             x1, y1 = pos_km[bus1]
     #             plt.plot(
     #                 [x0, x1], [y0, y1],
-    #                 color="green" if self.line_status_memory.get(lid, 1) == 1 else "red",
+    #                 color="green" if self.line_status.get(lid, 1) == 1 else "red",
     #                 linewidth=0.8,
-    #                 linestyle="--" if self.line_status_memory.get(lid, 1) == 0 else "-",
+    #                 linestyle="--" if self.line_status.get(lid, 1) == 0 else "-",
     #                 alpha=0.8,
     #             )
 
+    #     # ============================
+    #     # DIBUJAR LOS SWITCHES
+    #     # ============================
+
+    #     for sw_idx, sw in net.switch.iterrows():
+
+    #         bus_a = sw.bus
+    #         closed = sw.closed
+    #         et = sw.et
+    #         bus_b = sw.element   # si et='l' es line_id, si et='b' es otro bus
+
+    #         x = (pos_km[bus_a][0] + pos_km[bus_b][0]) / 2
+    #         y = (pos_km[bus_a][1] + pos_km[bus_b][1]) / 2
+
+    #         # dibujar línea entre buses
+    #         plt.plot(
+    #             [pos_km[bus_a][0], pos_km[bus_b][0]],
+    #             [pos_km[bus_a][1], pos_km[bus_b][1]],
+    #             color="green" if closed==True else "red", linewidth=0.3, zorder=4, linestyle="--"
+    #         )
+            
+    #         x = (pos_km[bus_a][0] + pos_km[bus_b][0]) / 2
+    #         y = (pos_km[bus_a][1] + pos_km[bus_b][1]) / 2
+        
+    #     # ==========================
+    #     # DIBUJAR RIO
+    #     # ==========================
+    #     plt.plot(
+    #         [1.5,-0.3],
+    #         [-0.3,1.5],
+    #         alpha=0.2,
+    #         color="blue", linewidth=20, linestyle="-"
+    #     )
+        
     #     # ==========================
     #     # FORMATO FINAL
     #     # ==========================
@@ -413,6 +548,7 @@ class PPModel(mosaik_api.Simulator):
     #     os.makedirs("figures", exist_ok=True)
     #     plt.savefig(f"figures/hour_{hour:02d}.png", dpi=200, bbox_inches="tight")
     #     plt.close()
+
     def plot_network(self, hour):
         import matplotlib.pyplot as plt
         import networkx as nx
@@ -423,131 +559,142 @@ class PPModel(mosaik_api.Simulator):
         plt.figure(figsize=(8, 6))
         net = self.net
 
-        # Crear grafo
-        G = top.create_nxgraph(net)
+        # =======================================
+        #  GRAFO REAL DE LA RED (incluye switches)
+        # =======================================
+        G = top.create_nxgraph(net, respect_switches=True, include_out_of_service=False)
 
-        # Conversión de pies → kilómetros
+        # =======================================
+        #  POSICIONES (convertir a km y centrar)
+        # =======================================
         FT_TO_KM = 0.0003048
         pos_km = {
-            bus: (
-                float(net.bus.at[bus, "x"]) * FT_TO_KM,
-                float(net.bus.at[bus, "y"]) * FT_TO_KM,
-            )
+            bus: (float(net.bus.at[bus, "x"]) * FT_TO_KM,
+                float(net.bus.at[bus, "y"]) * FT_TO_KM)
             for bus in net.bus.index
         }
 
-        # Centrar figura (coincide con el dominio del viento)
-        x_vals = [v[0] for v in pos_km.values()]
-        y_vals = [v[1] for v in pos_km.values()]
+        # Centrar posiciones
+        x_vals = [p[0] for p in pos_km.values()]
+        y_vals = [p[1] for p in pos_km.values()]
         x_mean, y_mean = np.mean(x_vals), np.mean(y_vals)
-        pos_km = {b: (x - x_mean, y - y_mean) for b, (x, y) in pos_km.items()}
+        pos_km = {b: (pos_km[b][0]-x_mean, pos_km[b][1]-y_mean) for b in pos_km}
 
-        # ==========================
-        # PLOT DEL VIENTO
-        # ==========================
-        if hasattr(self, "last_wind_field") and isinstance(self.last_wind_field, np.ndarray):
+        # =======================================
+        # 1) DIBUJAR VIENTO
+        # =======================================
+        if hasattr(self, "last_gust_speed") and isinstance(self.last_gust_speed, np.ndarray):
             if hasattr(self, "grid_x") and hasattr(self, "grid_y"):
                 X, Y = np.meshgrid(self.grid_x, self.grid_y)
-            elif hasattr(self, "wind_grid_lon") and hasattr(self, "wind_grid_lat"):
-                X, Y = np.meshgrid(self.wind_grid_lon, self.wind_grid_lat)
             else:
                 X, Y = None, None
 
-            if X is not None and Y is not None:
-                extent = [X.min(), X.max(), Y.min(), Y.max()]
+            if X is not None:
                 plt.imshow(
-                    self.last_wind_field,
+                    self.last_gust_speed,
                     origin="lower",
                     cmap="coolwarm",
                     alpha=0.5,
-                    extent=extent,
-                    vmin=0,
-                    vmax=np.max(self.last_wind_field),
+                    extent=[X.min(), X.max(), Y.min(), Y.max()],
+                    vmin=0, vmax=30
                 )
                 plt.colorbar(label="Velocidad del viento [m/s]", shrink=0.7)
-            else:
-                print("⚠️ No hay malla de viento (X, Y) para graficar.")
-        else:
-            print("⚠️ No hay campo de viento disponible para graficar.")
 
-        # ==========================
-        # 💡 COLOREAR LOS BUSES SEGÚN SI ESTÁN ENERGIZADOS
-        # ==========================
-        slack_bus_idx = int(net.ext_grid.bus.values[0]) if len(net.ext_grid.bus) > 0 else None
+        # =======================================
+        # 2) CÁLCULO CORRECTO DE BUSES ENERGIZADOS
+        # =======================================
+        # Slack real
+        slack_bus = int(net.ext_grid.bus.values[0])
+
+        # Buses energizados = componente conexa del slack
+        if slack_bus in G:
+            energized = set(nx.node_connected_component(G, slack_bus))
+        else:
+            energized = set()
+
+        # =======================================
+        # 3) PREPARAR ORDEN DE NODOS CORRECTO
+        # =======================================
+        nodes = list(G.nodes())
+        pos_filtered = {n: pos_km[n] for n in nodes}
 
         node_colors = []
-        node_sizes = []
-        for bus in net.bus.index:
-            if bus in net.res_bus.index:
-                vm = net.res_bus.at[bus, "vm_pu"]
-                if np.isnan(vm) or vm < 0.1:
-                    color = "red"
-                else:
-                    color = "skyblue"
+        node_sizes  = []
+
+        for b in nodes:
+            if b == slack_bus:
+                node_colors.append("limegreen")
+                node_sizes.append(20)
+            elif b in energized:
+                node_colors.append("green")
+                node_sizes.append(10)
             else:
-                color = "red"
+                node_colors.append("red")
+                node_sizes.append(10)
 
-            # 💡 Marcar el bus generador (slack)
-            if bus == slack_bus_idx:
-                color = "limegreen"  # verde brillante
-                size = 80            # más grande
-            else:
-                size = 20
-
-            node_colors.append(color)
-            node_sizes.append(size)
-            
-        # === Etiquetas de buses (número o nombre) ===
-        labels = {bus: str(bus) for bus in net.bus.index}
-
-        # Si usas nombres en lugar de índices:
-        # labels = {bus: str(net.bus.at[bus, "name"]) for bus in net.bus.index}
-
-        nx.draw_networkx_labels(
+        # =======================================
+        # 4) DIBUJAR NODOS
+        # =======================================
+        nx.draw_networkx_nodes(
             G,
-            pos_km,
-            labels=labels,
-            font_size=6,         # tamaño pequeño para no saturar
-            font_color="black",  # o "darkgreen" si prefieres sobre el fondo
-            verticalalignment="center",
-            horizontalalignment="center"
-)
-        # ==========================
-        # PLOT DE LA RED
-        # ==========================
-        nx.draw_networkx_nodes(G, pos_km, node_color=node_colors, node_size=8, edgecolors="black")
+            pos_filtered,
+            nodelist=nodes,   # 🔥 Mantiene correspondencia 1 a 1
+            node_color=node_colors,
+            node_size=node_sizes,
+            edgecolors="black"
+        )
 
+        # =======================================
+        # 5) DIBUJAR LÍNEAS
+        # =======================================
         for lid in net.line.index:
-            bus0 = net.line.at[lid, "from_bus"]
-            bus1 = net.line.at[lid, "to_bus"]
-            if bus0 in pos_km and bus1 in pos_km:
-                x0, y0 = pos_km[bus0]
-                x1, y1 = pos_km[bus1]
+            fb = net.line.at[lid, "from_bus"]
+            tb = net.line.at[lid, "to_bus"]
+
+            if fb in pos_km and tb in pos_km:
+                x0, y0 = pos_km[fb]
+                x1, y1 = pos_km[tb]
+
                 plt.plot(
                     [x0, x1], [y0, y1],
-                    color="green" if self.line_status_memory.get(lid, 1) == 1 else "red",
+                    color="green" if self.line_status.get(lid, 1)==1 else "red",
+                    linestyle="-",
                     linewidth=0.8,
-                    linestyle="--" if self.line_status_memory.get(lid, 1) == 0 else "-",
                     alpha=0.8,
                 )
-                
-        # Opcional: etiqueta el generador
-        if slack_bus_idx is not None:
-            x_slack, y_slack = pos_km[slack_bus_idx]
-            plt.text(
-                x_slack, y_slack + 0.02,
-                "GEN",
-                color="green",
-                fontsize=9,
-                ha="center",
-                va="bottom",
-                fontweight="bold",
-                bbox=dict(facecolor="white", alpha=0.6, edgecolor="none", boxstyle="round,pad=0.2")
+
+        # =======================================
+        # 6) DIBUJAR SWITCHES B-B Y B-L
+        # =======================================
+        for _, sw in net.switch.iterrows():
+            bus_a = sw.bus
+            if sw.et == "b":  # bus-bus switch
+                bus_b = sw.element
+            else:             # bus-line switch
+                continue
+
+            x0, y0 = pos_km[bus_a]
+            x1, y1 = pos_km[bus_b]
+
+            plt.plot(
+                [x0, x1], [y0, y1],
+                color="green" if sw.closed else "red",
+                linewidth=0.5,
+                linestyle="--",
+                zorder=4
             )
 
-        # ==========================
-        # FORMATO FINAL
-        # ==========================
+        # =======================================
+        # 7) RÍO (igual que tu versión)
+        # =======================================
+        plt.plot(
+            [1.5, -0.3], [-0.3, 1.5],
+            alpha=0.2, color="blue", linewidth=20
+        )
+
+        # =======================================
+        # 8) FORMATOS
+        # =======================================
         plt.title(f"IEEE123 - Estado de la red + viento (t = {hour} h)")
         plt.xlabel("Distancia Este–Oeste [km]")
         plt.ylabel("Distancia Norte–Sur [km]")
@@ -558,4 +705,3 @@ class PPModel(mosaik_api.Simulator):
         os.makedirs("figures", exist_ok=True)
         plt.savefig(f"figures/hour_{hour:02d}.png", dpi=200, bbox_inches="tight")
         plt.close()
-

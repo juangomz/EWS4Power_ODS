@@ -1,8 +1,8 @@
 import mosaik
 
-import importlib
-import simuladores.Climate_model
-importlib.reload(simuladores.Climate_model)
+# import importlib
+# import simuladores.Climate_model
+# importlib.reload(simuladores.Climate_model)
 
 
 SIM_CONFIG = {
@@ -10,43 +10,53 @@ SIM_CONFIG = {
     'FailureModel': {'python': 'simuladores.Failure_model:FailureModel'},
     'PPModel': {'python': 'simuladores.PP_model:PPModel'},
     'OpDecisionModel': {'python': 'simuladores.Op_Decision_model:OpDecisionModel'}
-    # 'PyPSA_Sim': {'python': 'simuladores.pypsa_sim:PyPSASim'},
 }
 
 def main():
     world = mosaik.World(SIM_CONFIG)
 
-    climate = world.start('ClimateModel', time_resolution=3600)
-    failure = world.start('FailureModel', time_resolution=3600)
-    decision = world.start('OpDecisionModel', time_resolution=3600)
-    grid = world.start('PPModel', time_resolution=3600)
-    
+    # --- Inicialización de simuladores ---
+    print("⚙️ Iniciando simuladores...")
 
+    climate = world.start('ClimateModel', step_size=3600)
+    failure = world.start('FailureModel', step_size=3600)
+    decision = world.start('OpDecisionModel', step_size=3600)
+    grid = world.start('PPModel', step_size=3600)
+
+    # --- Crear entidades ---
     c = climate.ClimateModel.create(1)[0]
     g = grid.PPModel.create(1)[0]
 
-
-    # Obtener line_positions del grid antes de la simulación
-    grid_data = world.get_data({g: ['num_lines', 'line_positions']})
-    num_lines = list(grid_data.values())[0]['num_lines']
+    # --- Obtener posiciones de líneas del grid ---
+    grid_data = world.get_data({g: ['line_positions', 'line_status']})
     line_positions = list(grid_data.values())[0]['line_positions']
+    line_status = list(grid_data.values())[0]['line_status']
 
-    # Pasa line_positions como parámetro
+    # --- Crear entidades dependientes ---
     f = failure.FailureModel.create(1, line_positions=line_positions)[0]
     d = decision.OpDecisionModel.create(1)[0]
-    # --- Conexiones ---
-    # El viento alimenta a todos los modelos de fallo
-    world.connect(c, f, 'wind_speed', 'grid_x', 'grid_y', 'wind_shape')
     
-    # Cada modelo de fallo controla la red
-    # for f in failures:
-    #     world.connect(f, g, ('line_status', 'line_status'))
-    world.connect(f, d, 'line_status', 'line_status')
-        
-    world.connect(d, g, 'line_status', 'line_status')
+    # ================================================================
+    # CONEXIONES ENTRE SIMULADORES
+    # ================================================================
 
+    # 🌀 Clima → Fallo
+    world.connect(c, f, 'gust_speed', 'grid_x', 'grid_y', 'shape')
+    
     # El viento también alimenta al grid directamente
-    world.connect(c, g, 'wind_speed', 'grid_x', 'grid_y', 'wind_shape')
+    world.connect(c, g, 'gust_speed', 'grid_x', 'grid_y', 'shape')
+
+    # 🌀 Fallo → Decisión (probabilidades)
+    world.connect(f, d, 'fail_prob', 'fail_prob')
+
+    # 🌀 Fallo → Red (probabilidades)
+    world.connect(f, g, 'fail_prob','fail_prob')
+
+    # 🧩 Decisión → Red (plan de reparación)
+    world.connect(d, g, 'repair_plan', 'repair_plan')
+
+    # 🔁 Red → Decisión (estado actualizado)
+    world.connect(g, d, 'line_status', time_shifted=True, initial_data={'line_status':line_status})
     
     # Ejecutar simulación por 24 horas
     world.run(until=24 * 3600)

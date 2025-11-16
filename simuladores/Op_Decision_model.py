@@ -1,5 +1,5 @@
 import mosaik_api
-import numpy as np
+import gurobipy as gp
 
 META = {
     'api_version': '3.0',
@@ -7,74 +7,82 @@ META = {
     'models': {
         'OpDecisionModel': {
             'public': True,
-            'attrs': ['line_status', 'repaired_lines'],
+            'attrs': ['fail_prob', 'repair_plan', 'line_status'],
         },
     },
 }
 
+
 class OpDecisionModel(mosaik_api.Simulator):
     def __init__(self):
         super().__init__(META)
-        self.failed_lines = {}   # Mapa de líneas falladas (lid -> tiempo de fallo)
-        self.repair_time = 3 * 3600  # Tiempo para reparar una línea (3 horas)
-        self.resources = 2        # Cuadrillas disponibles
-        self.ongoing_repairs = {} # Mapa de reparaciones en curso (lid -> tiempo de inicio)
-        self.repaired_lines = []  # Lista de líneas reparadas en este paso
-        self.line_status = {}     # Diccionario global del estado de todas las líneas
+
+        # Estado interno
+        self.line_status = {}        # Estado actual de las líneas
+        self.fail_prob = {}          # Probabilidad de fallo recibida
+        self.failed_lines = set()    # Líneas caídas acumuladas
+        self.repair_time = 3600      # Tiempo mínimo para reparar (1h)
+        self.resources = 2           # Cuadrillas
+        self.ongoing_repairs = {}    # {line_id: finish_time}
+        self.current_repair_plan = {}  # Se envía al grid
 
     def init(self, sid, **sim_params):
         return META
 
     def create(self, num, model):
-        # Inicializamos line_status con todas las líneas operativas (estado = 1)
-        self.line_status = {f'Line_{i}': 1 for i in range(num)}  # Todas las líneas operativas al principio
-        return [{'eid': 'OpDecisionModel', 'type': model, 'rel': []}]
+        return [{'eid': 'OpDecisionModel', 'type': model}]
 
     def step(self, time, inputs, max_advance):
-        repaired = []  # Lista de líneas reparadas
-        line_status_updates = {}  # Diccionario de estados de las líneas
-
-        # Leer entrada de FailureModel (status de las líneas)
-        line_status_inputs = {}
-        for _, vals in inputs.items():
+        """Recibe fail_prob y line_status_prev, decide reparaciones."""
+        # Leer inputs
+        for src, vals in inputs.items():
+            if 'fail_prob' in vals:
+                self.fail_prob = list(vals['fail_prob'].values())[0]
             if 'line_status' in vals:
-                line_status_inputs = vals['line_status']
+                self.line_status = list(vals['line_status'].values())[0]
 
-        # Procesar líneas falladas y asignar recursos de reparación
-        for src_id, _ in line_status_inputs.items():
-            line_dict = line_status_inputs[src_id]
-            for line_id, status in line_dict.items():
-                if status == 0:  # La línea está caída
-                    if line_id not in self.failed_lines:
-                        self.failed_lines[line_id] = time  # Registrar el tiempo de fallo
+        # === Detectar nuevas líneas caídas ===
+        for lid, status in self.line_status.items():
+            if status == 0:  # caída
+                self.failed_lines.add(lid)
 
-        # Asignar recursos (reparar líneas)
-        while len(self.ongoing_repairs) < self.resources and self.failed_lines:
-            lid, fail_time = self.failed_lines.popitem()
-            self.ongoing_repairs[lid] = time  # Comienza la reparación de la línea
+        # === Finalizar reparaciones que terminan ahora ===
+        to_remove = []
+        for lid, finish_time in self.ongoing_repairs.items():
+            if time >= finish_time:
+                self.line_status[lid] = 1
+                to_remove.append(lid)
 
-        # Reparar líneas que han alcanzado el tiempo de reparación
-        for lid, start_time in list(self.ongoing_repairs.items()):
-            if time - start_time >= self.repair_time:
-                repaired.append(lid)
-                del self.ongoing_repairs[lid]
+        for lid in to_remove:
+            del self.ongoing_repairs[lid]
+            if lid in self.failed_lines:
+                self.failed_lines.remove(lid)
 
-        # Actualizar el estado de las líneas
-        for lid in repaired:
-            line_status_updates[lid] = 1  # La línea se ha reparado, por lo tanto su estado es 1
-            self.repaired_lines.append(lid)  # Agregar a las reparadas
+        # === Asignar cuadrillas libres a fallos pendientes ===
+        free_crews = self.resources - len(self.ongoing_repairs)
+        new_repairs = []
 
-        self.line_status = line_dict
-        for lid in self.repaired_lines:
-            self.line_status[lid] = 1
+        if free_crews > 0:
+            for lid in sorted(self.failed_lines):
+                if free_crews <= 0:
+                    break
+                finish = time + self.repair_time
+                self.ongoing_repairs[lid] = finish
+                new_repairs.append((lid, finish))
+                free_crews -= 1
 
-        return time + 3600
+        # === Generar repair_plan para grid ===
+        self.current_repair_plan = {
+            lid: {'finish_time': finish}
+            for lid, finish in self.ongoing_repairs.items()
+        }
 
-    def get_data(self, outputs=None):
-        """Devuelve las líneas reparadas y el estado completo de todas las líneas a Mosaik"""
+        return time + 3600  # paso 1 hora
+
+    def get_data(self, outputs):
         return {
             'OpDecisionModel': {
-                'repaired_lines': self.repaired_lines,
-                'line_status': self.line_status  # Devuelve el estado completo de todas las líneas
+                'repair_plan': self.current_repair_plan,
+                'line_status': self.line_status
             }
         }
