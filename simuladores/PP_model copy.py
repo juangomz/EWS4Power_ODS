@@ -15,25 +15,6 @@ np.random.seed(2025)   # cualquier número fijo
 
 data_dir = './data/red_electrica'
 
-def net_cigre15_mv(IN_PATH):
-    """Carga la red CIGRE desde Excel exportado de pandapower."""
-    CIG_MV_NET_PATH = os.path.join(IN_PATH, 'CIG_MV_net_rev1_23_09_25.xlsx')
-    net = pp.from_excel(CIG_MV_NET_PATH)
-    return net
-
-def decode_geodata_string(s):
-    """Convierte un string JSON escapado en dict con coordinates."""
-    if not isinstance(s, str):
-        return None
-    try:
-        obj = json.loads(s)
-        if isinstance(obj, dict) and "coordinates" in obj:
-            return obj["coordinates"]
-    except Exception:
-        pass
-    return None
-
-
 META = {
     'api_version': '3.0',
     'type': 'time-based',
@@ -101,63 +82,151 @@ class PPModel(mosaik_api.Simulator):
     # ==============================================================
 
     def setup_network(self):
-        """Carga la red CIGRE y convierte geodata escapado a coordenadas x,y."""
+        """Carga la red eléctrica desde los CSVs y crea el modelo pandapower."""
         
-        print("📁 Cargando red CIGRE desde Excel...")
-        IN_PATH = "./data/red_electrica"
+        data_dir = "feeder123"
+        print("Cargando datos del IEEE123...")
 
-        # ============================
-        # 1) Cargar la red
-        # ============================
-        try:
-            self.net = net_cigre15_mv(IN_PATH)
-        except Exception as e:
-            print(f"❌ Error cargando red CIGRE: {e}")
-            raise e
+        # === Leer archivos ===
+        lines_xls = pd.read_excel(
+            os.path.join(data_dir, "line data.xls"),
+            skiprows=2
+        )
+        lines_xls['Node A'] = lines_xls['Node A'].astype(str).str.strip()
+        lines_xls['Node B'] = lines_xls['Node B'].astype(str).str.strip()
+        config_xls = pd.read_excel(os.path.join(data_dir, "config data.xls"),
+                                   skiprows=2
+        )
+        loads_xls = pd.read_excel(os.path.join(data_dir, "spot loads data.xls"),
+                                  skiprows=2
+        )
+        loads_xls['Node']   = loads_xls['Node'].astype(str).str.strip()
 
-        net = self.net
-        print(f"🔌 Red cargada: {len(net.bus)} buses, {len(net.line)} líneas, {len(net.load)} cargas.")
+        coords = pd.read_csv("feeder123/BusCoords.csv", header=None, sep=r"[;\s]+", engine="python", decimal=',')
+        coords.columns = ["bus", "x", "y"]
+        coords["bus"] = coords["bus"].astype(str).str.strip()
+
+        for name in coords["bus"]:
+            pp.create_bus(self.net, vn_kv=4.16, name=str(name))
+
+        for _, r in coords.iterrows():
+            m = self.net.bus[self.net.bus.name == r["bus"]]
+            if not m.empty:
+                idx = m.index[0]
+                self.net.bus.at[idx, "x"] = float(r["x"])
+                self.net.bus.at[idx, "y"] = float(r["y"])
+
+        # === Crear líneas ===
+        for _, row in lines_xls.iterrows():
+            try:
+                bus0 = int(row['Node A'].strip())
+                bus1 = int(row['Node B'].strip())
+                
+                busA = self.net.bus[self.net.bus["name"] == str(bus0)].index[0]
+                busB = self.net.bus[self.net.bus["name"] == str(bus1)].index[0]
+                
+                length_km = row['Length (ft.)'] * 0.0003048 # pasar de pies a km
+
+                cfg = str(row['Config.']).strip()
+                cfg_map = {
+                    1: (0.4, 0.05),
+                    2: (0.5, 0.06),
+                    3: (0.6, 0.08),
+                    4: (0.4, 0.05),
+                    5: (0.5, 0.06),
+                    6: (0.5, 0.07),
+                    7: (0.4, 0.05),
+                    8: (0.5, 0.06),
+                    9: (0.4, 0.05),
+                    10: (0.5, 0.06),
+                    11: (0.4, 0.05),
+                    12: (0.4, 0.05),
+                }
+
+                r_ohm_per_km, x_ohm_per_km = cfg_map.get(cfg, (0.5, 0.06))
+
+                name = f"Line_{row['Node A']}_{row['Node B']}"
+
+                pp.create_line_from_parameters(
+                    self.net,
+                    from_bus=busA,     # ← SIEMPRE Node A
+                    to_bus=busB,       # ← SIEMPRE Node B
+                    length_km=length_km,
+                    r_ohm_per_km=r_ohm_per_km,
+                    x_ohm_per_km=x_ohm_per_km,
+                    c_nf_per_km=0.0,
+                    max_i_ka=0.2,
+                    name=name
+                )
+            except Exception as e:
+                print(f"⚠️  Error creando línea {row.get('Node A', '?')}-{row.get('Node B', '?')}: {e}")
+                
+        # Punetes entre ramas desconectadas
+        bridge_pairs = [
+            ("18", "135"),
+            ("13", "152"),
+            ("54", "94"),
+            ("151", "300"),
+            ("97", "197"),
+            ("60", "160"),
+        ]
+
+        # Incluir puentes en la red
+        for a, b in bridge_pairs:
+            if a in self.net.bus.name.values and b in self.net.bus.name.values:
+                bus_a = self.net.bus[self.net.bus.name == a].index[0]
+                bus_b = self.net.bus[self.net.bus.name == b].index[0]
+                if int(a) in (13,18, 54, 151):
+                    closed = True
+                else:
+                    closed = False
+                pp.create_switch(
+                    self.net,
+                    bus=bus_a,
+                    element=bus_b,
+                    et="b",
+                    closed=closed
+                )
+                print(f"🔗 Puente añadido entre {a} y {b}")
+
+        # === Crear cargas ===
+        for _, row in loads_xls.iterrows():
+            try:
+                bus_name = str(row['Node']).strip()
+                if bus_name not in self.net.bus.name.values:
+                    continue
+                bus_idx = self.net.bus[self.net.bus.name == bus_name].index[0]
+                # Sumar fases si hay más de una
+                p_kw = sum([v for k, v in row.items() if 'Ph-' in k and isinstance(v, (int, float)) and 'kW' not in k])
+                pp.create_load(self.net, bus=bus_idx, p_mw=p_kw / 1000, name=f"Load_{bus_name}")
+            except Exception as e:
+                print(f"⚠️  Error creando carga en {bus_name}: {e}")
+                
+        if "150" not in self.net.bus["name"].values:
+            b150 = pp.create_bus(self.net, vn_kv=4.16, name="150")
+            self.net.bus.at[b150, "x"] = 100
+            self.net.bus.at[b150, "y"] = 1500
+
+        # 2. Índices de buses por nombre (OJO: strings)
+        bus150_idx = self.net.bus[self.net.bus.name == "150"].index[0]
+        bus149_idx = self.net.bus[self.net.bus.name == "149"].index[0]
+
+        # 3. Switch bus–bus entre 150 y 149
+        pp.create_switch(
+            self.net,
+            bus=bus150_idx,
+            element=bus149_idx,
+            et="b",      # bus-bus switch
+            closed=True
+        )
         
-        # ============================================
-        # SWITCHES SEGÚN dnr_status
-        # ============================================
-        for lid in net.line.index:
-            raw = str(net.line.at[lid, "dnr_status"]).lower()
-            status = raw.replace("{", "").replace("}", "").strip()
-            
-            # ¿es switchable según el Excel?
-            if status != "switchable":
-                continue
-            
-            # Crear switch línea–bus en ambos extremos
-            fb = net.line.at[lid, "from_bus"]
-            tb = net.line.at[lid, "to_bus"]
-
-            if lid not in net.switch.element.values:
-                pp.create_switch(net, bus=fb, element=lid, et="l", closed=True)
-                print(f"✔ Switches añadidos a línea switchable {lid}: {fb}-{tb}")
-            
-            
-
-        # ============================
-        # 2) Decodificar geodata de buses
-        # ============================
-        if "geo" in net.bus.columns:
-            print("🛠 Decodificando geodata de buses...")
-            for b in net.bus.index:
-                coords = decode_geodata_string(net.bus.at[b, "geo"])
-                if coords:
-                    net.bus.at[b, "x"] = float(coords[0])*500
-                    net.bus.at[b, "y"] = float(coords[1])*500
-
-        # ============================
-        # 4) Preparar lista de líneas y estados
-        # ============================
-        self.lines = dict(zip(net.line.index, net.line.name))
+        # === Crear barra slack ===
+        pp.create_ext_grid(self.net, bus=bus150_idx, vm_pu=1.0)
+        
+        self.lines = dict(zip(self.net.line.index, self.net.line.name))
         self.line_status = {lid: 1 for lid in self.lines.keys()}
 
-        print("✅ setup_network() completado.")
-
+        print(f"✅ Red creada: {len(self.net.bus)} buses, {len(self.net.line)} líneas, {len(self.net.load)} cargas.")
     
 
     # ==============================================================
@@ -337,12 +406,12 @@ class PPModel(mosaik_api.Simulator):
         net = self.net
 
         # =======================================
-        #  GRAFO REAL (respeta switches)
+        #  GRAFO REAL DE LA RED (incluye switches)
         # =======================================
         G = top.create_nxgraph(net, respect_switches=True, include_out_of_service=False)
 
         # =======================================
-        # POSICIONES (convertir a km y centrar)
+        #  POSICIONES (convertir a km y centrar)
         # =======================================
         FT_TO_KM = 0.0003048
         pos_km = {
@@ -351,11 +420,11 @@ class PPModel(mosaik_api.Simulator):
             for bus in net.bus.index
         }
 
-        # Centrado
-        xs = [p[0] for p in pos_km.values()]
-        ys = [p[1] for p in pos_km.values()]
-        x_mean, y_mean = np.mean(xs), np.mean(ys)
-        pos_km = {b: (pos_km[b][0] - x_mean, pos_km[b][1] - y_mean) for b in pos_km}
+        # Centrar posiciones
+        x_vals = [p[0] for p in pos_km.values()]
+        y_vals = [p[1] for p in pos_km.values()]
+        x_mean, y_mean = np.mean(x_vals), np.mean(y_vals)
+        pos_km = {b: (pos_km[b][0]-x_mean, pos_km[b][1]-y_mean) for b in pos_km}
 
         # =======================================
         # 1) DIBUJAR VIENTO
@@ -363,6 +432,10 @@ class PPModel(mosaik_api.Simulator):
         if hasattr(self, "last_gust_speed") and isinstance(self.last_gust_speed, np.ndarray):
             if hasattr(self, "grid_x") and hasattr(self, "grid_y"):
                 X, Y = np.meshgrid(self.grid_x, self.grid_y)
+            else:
+                X, Y = None, None
+
+            if X is not None:
                 plt.imshow(
                     self.last_gust_speed,
                     origin="lower",
@@ -374,16 +447,25 @@ class PPModel(mosaik_api.Simulator):
                 plt.colorbar(label="Velocidad del viento [m/s]", shrink=0.7)
 
         # =======================================
-        # 2) BUSES ENERGIZADOS (topología real)
+        # 2) CÁLCULO CORRECTO DE BUSES ENERGIZADOS
         # =======================================
+        # Slack real
         slack_bus = int(net.ext_grid.bus.values[0])
-        energized = set(nx.node_connected_component(G, slack_bus)) if slack_bus in G else set()
 
+        # Buses energizados = componente conexa del slack
+        if slack_bus in G:
+            energized = set(nx.node_connected_component(G, slack_bus))
+        else:
+            energized = set()
+
+        # =======================================
+        # 3) PREPARAR ORDEN DE NODOS CORRECTO
+        # =======================================
         nodes = list(G.nodes())
         pos_filtered = {n: pos_km[n] for n in nodes}
 
         node_colors = []
-        node_sizes = []
+        node_sizes  = []
 
         for b in nodes:
             if b == slack_bus:
@@ -396,39 +478,22 @@ class PPModel(mosaik_api.Simulator):
                 node_colors.append("red")
                 node_sizes.append(10)
 
+        # =======================================
+        # 4) DIBUJAR NODOS
+        # =======================================
         nx.draw_networkx_nodes(
             G,
             pos_filtered,
-            nodelist=nodes,
+            nodelist=nodes,   # 🔥 Mantiene correspondencia 1 a 1
             node_color=node_colors,
             node_size=node_sizes,
             edgecolors="black"
         )
-        
-        # =======================================
-        # DIBUJAR NOMBRES DE LOS NODOS
-        # =======================================
-        for bus_idx in nodes:
-            x, y = pos_filtered[bus_idx]
-            label = str(net.bus.at[bus_idx, "name"])
-            
-            plt.text(
-                x, y + 0.03,          # pequeño desplazamiento vertical
-                label,
-                fontsize=7,
-                ha="center",
-                va="bottom"
-            )
 
         # =======================================
-        # 3) DIBUJAR LÍNEAS NO SWITCHABLES
+        # 5) DIBUJAR LÍNEAS
         # =======================================
-        switchable_lines = set(net.switch[net.switch.et == "l"].element.values)
-
         for lid in net.line.index:
-            if lid in switchable_lines:
-                continue  # ❌ NO dibujar líneas conmutables
-
             fb = net.line.at[lid, "from_bus"]
             tb = net.line.at[lid, "to_bus"]
 
@@ -438,83 +503,37 @@ class PPModel(mosaik_api.Simulator):
 
                 plt.plot(
                     [x0, x1], [y0, y1],
-                    color="green" if self.line_status.get(lid, 1) == 1 else "red",
+                    color="green" if self.line_status.get(lid, 1)==1 else "red",
                     linestyle="-",
                     linewidth=0.8,
                     alpha=0.8,
                 )
 
         # =======================================
-        # 4) DIBUJAR SWITCHES
+        # 6) DIBUJAR SWITCHES B-B Y B-L
         # =======================================
         for _, sw in net.switch.iterrows():
+            bus_a = sw.bus
+            if sw.et == "b":  # bus-bus switch
+                bus_b = sw.element
+            else:             # bus-line switch
+                continue
 
-            # ---- bus-line switch ----
-            if sw.et == "l":
-                line = sw.element
-                bus = sw.bus
+            x0, y0 = pos_km[bus_a]
+            x1, y1 = pos_km[bus_b]
 
-                fb = net.line.at[line, "from_bus"]
-                tb = net.line.at[line, "to_bus"]
-
-                other_bus = tb if bus == fb else fb
-
-                x0, y0 = pos_km[bus]
-                x1, y1 = pos_km[other_bus]
-
-                plt.plot(
-                    [x0, x1], [y0, y1],
-                    color="green" if sw.closed else "red",
-                    linewidth=1.3,
-                    linestyle="--",
-                    zorder=5
-                )
-
-            # ---- bus-bus switch ----
-            elif sw.et == "b":
-                b1 = sw.bus
-                b2 = sw.element
-
-                x0, y0 = pos_km[b1]
-                x1, y1 = pos_km[b2]
-
-                plt.plot(
-                    [x0, x1], [y0, y1],
-                    color="green" if sw.closed else "red",
-                    linewidth=1.3,
-                    linestyle="--",
-                    zorder=5
-                )
-                
-        # =======================================
-        # 5) DIBUJAR TRANSFORMADORES (hv_bus ↔ lv_bus)
-        # =======================================
-
-        for tid, trafo in net.trafo.iterrows():
-            hv = trafo.hv_bus
-            lv = trafo.lv_bus
-
-            if hv in pos_km and lv in pos_km:
-                x0, y0 = pos_km[hv]
-                x1, y1 = pos_km[lv]
-
-                plt.plot(
-                    [x0, x1], [y0, y1],
-                    color="blue",
-                    linewidth=1.0,
-                    linestyle="--",
-                    alpha=0.9,
-                    zorder=3,
-                )
-
-                # Opcional: etiqueta del trafo
-                mx, my = (x0 + x1) / 2, (y0 + y1) / 2
-                plt.text(mx, my + 0.03, f"T{tid}", color="blue", fontsize=7, ha="center")
+            plt.plot(
+                [x0, x1], [y0, y1],
+                color="green" if sw.closed else "red",
+                linewidth=0.5,
+                linestyle="--",
+                zorder=4
+            )
 
         # =======================================
-        # 6) FORMATO + GUARDADO
+        # 8) FORMATOS
         # =======================================
-        plt.title(f"Red CIGRE - Topología y viento (t = {hour} h)")
+        plt.title(f"IEEE123 - Estado de la red + viento (t = {hour} h)")
         plt.xlabel("Distancia Este–Oeste [km]")
         plt.ylabel("Distancia Norte–Sur [km]")
         plt.gca().set_aspect("equal", adjustable="box")

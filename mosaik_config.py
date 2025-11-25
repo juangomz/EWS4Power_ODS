@@ -28,9 +28,12 @@ def main():
     g = grid.PPModel.create(1)[0]
 
     # --- Obtener posiciones de líneas del grid ---
-    grid_data = world.get_data({g: ['line_positions', 'line_status']})
+    grid_data = world.get_data({g: ['line_positions', 'line_status', 'lines', 'buses']})
     line_positions = list(grid_data.values())[0]['line_positions']
     line_status = list(grid_data.values())[0]['line_status']
+    lines = list(grid_data.values())[0]['lines']
+    buses = list(grid_data.values())[0]['buses']
+    switches = list(grid_data.values())[0]['switches']
 
     # --- Crear entidades dependientes ---
     f = failure.FailureModel.create(1, line_positions=line_positions)[0]
@@ -53,10 +56,10 @@ def main():
     world.connect(f, g, 'fail_prob','fail_prob')
 
     # 🧩 Decisión → Red (plan de reparación)
-    world.connect(d, g, 'repair_plan', 'repair_plan')
+    world.connect(d, g, 'repair_plan', 'switch_plan')
 
     # 🔁 Red → Decisión (estado actualizado)
-    world.connect(g, d, 'line_status', time_shifted=True, initial_data={'line_status':line_status})
+    world.connect(g, d, 'line_status', 'lines', 'buses', 'switches', time_shifted=True, initial_data={'line_status':line_status, 'lines':lines, 'buses':buses, 'switches':switches})
     
     # Ejecutar simulación por 24 horas
     world.run(until=24 * 3600)

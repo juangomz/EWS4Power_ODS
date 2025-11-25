@@ -144,7 +144,7 @@ class OpDecisionModel(mosaik_api.Simulator):
 
         # ===== SLACK =====
 
-        slack_candidates = self.buses[self.buses["name"] == "Bus 0"]
+        slack_candidates = self.buses[self.buses["name"] == "150"]
         if len(slack_candidates) == 0:
             raise RuntimeError("Slack bus (name=='150') no encontrado.")
         slack = slack_candidates.index[0]
