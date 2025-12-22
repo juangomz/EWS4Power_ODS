@@ -1,6 +1,5 @@
 import mosaik_api
 import pandapower as pp
-import pandapower.topology as top
 import pandas as pd
 import numpy as np
 import csv
@@ -9,7 +8,6 @@ import matplotlib.pyplot as plt
 import networkx as nx
 from simuladores.logger import Logger
 import json
-import pandapower.converter as pc
 
 np.random.seed(2025)   # cualquier número fijo
 
@@ -54,6 +52,7 @@ META = {
                 'lines',
                 'buses',
                 'switches',
+                'transformers',
                 'switch_plan'
             ],
         }
@@ -121,21 +120,21 @@ class PPModel(mosaik_api.Simulator):
         # ============================================
         # SWITCHES SEGÚN dnr_status
         # ============================================
-        for lid in net.line.index:
-            raw = str(net.line.at[lid, "dnr_status"]).lower()
-            status = raw.replace("{", "").replace("}", "").strip()
+        # for lid in net.line.index:
+        #     raw = str(net.line.at[lid, "dnr_status"]).lower()
+        #     status = raw.replace("{", "").replace("}", "").strip()
             
-            # ¿es switchable según el Excel?
-            if status != "switchable":
-                continue
+        #     # ¿es switchable según el Excel?
+        #     if status != "switchable":
+        #         continue
             
-            # Crear switch línea–bus en ambos extremos
-            fb = net.line.at[lid, "from_bus"]
-            tb = net.line.at[lid, "to_bus"]
+        #     # Crear switch línea–bus en ambos extremos
+        #     fb = net.line.at[lid, "from_bus"]
+        #     tb = net.line.at[lid, "to_bus"]
 
-            if lid not in net.switch.element.values:
-                pp.create_switch(net, bus=fb, element=lid, et="l", closed=True)
-                print(f"✔ Switches añadidos a línea switchable {lid}: {fb}-{tb}")
+        #     if lid not in net.switch.element.values:
+        #         pp.create_switch(net, bus=fb, element=lid, et="l", closed=True)
+        #         print(f"✔ Switches añadidos a línea switchable {lid}: {fb}-{tb}")
             
             
 
@@ -322,7 +321,8 @@ class PPModel(mosaik_api.Simulator):
                 'line_status': self.line_status,
                 'lines': self.net.line,
                 'buses': self.net.bus,
-                'switches': self.net.switch
+                'switches': self.net.switch,
+                'transformers': self.net.trafo,
             }
         }
 

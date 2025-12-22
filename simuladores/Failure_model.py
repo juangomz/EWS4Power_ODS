@@ -1,5 +1,4 @@
 import mosaik_api
-from simuladores.logger import Logger
 import numpy as np
 
 META = {
@@ -80,7 +79,7 @@ class FailureModel(mosaik_api.Simulator):
     # ============================================================
     # Muestra viento a lo largo de una línea y calcula fallo
     def compute_gust_failure(self, x0, y0, x1, y1,
-                    v_th_mean=28.0, alpha_mean=0.0006, beta_mean=3.0,
+                    v_th_mean=20.0, alpha_mean=0.0006, beta_mean=3.0,
                     sigma_vth=2, sigma_alpha=0.0002, sigma_beta=0.4):
         """
         Modelo de fallo exponencial (Weibull-like) con dispersión en parámetros.
