@@ -1,2 +1,2 @@
 # EWS4Power_AIRisk
-Extreme Weather Simulator for Power Grids using AI for evaluating risk
+Extreme Weather Simulator for Power Grids using Genetic Algortihm for operational decision support
