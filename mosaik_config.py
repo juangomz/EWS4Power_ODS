@@ -68,7 +68,7 @@ def main():
 from pyinstrument import Profiler
 
 if __name__ == "__main__":
-    profiler = Profiler(interval=0.001, async_mode=True)
+    profiler = Profiler(interval=0.001, async_mode="enabled")
     profiler.start()
     print("🚀 Simulación iniciada (usa Ctrl+C para detener y ver el perfil)...")
 
