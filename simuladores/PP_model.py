@@ -120,21 +120,21 @@ class PPModel(mosaik_api.Simulator):
         # ============================================
         # SWITCHES SEGÚN dnr_status
         # ============================================
-        # for lid in net.line.index:
-        #     raw = str(net.line.at[lid, "dnr_status"]).lower()
-        #     status = raw.replace("{", "").replace("}", "").strip()
+        for lid in net.line.index:
+            raw = str(net.line.at[lid, "dnr_status"]).lower()
+            status = raw.replace("{", "").replace("}", "").strip()
             
-        #     # ¿es switchable según el Excel?
-        #     if status != "switchable":
-        #         continue
+            # ¿es switchable según el Excel?
+            if status != "switchable":
+                continue
             
-        #     # Crear switch línea–bus en ambos extremos
-        #     fb = net.line.at[lid, "from_bus"]
-        #     tb = net.line.at[lid, "to_bus"]
+            # Crear switch línea–bus en ambos extremos
+            fb = net.line.at[lid, "from_bus"]
+            tb = net.line.at[lid, "to_bus"]
 
-        #     if lid not in net.switch.element.values:
-        #         pp.create_switch(net, bus=fb, element=lid, et="l", closed=True)
-        #         print(f"✔ Switches añadidos a línea switchable {lid}: {fb}-{tb}")
+            if lid not in net.switch.element.values:
+                pp.create_switch(net, bus=fb, element=lid, et="l", closed=True)
+                print(f"✔ Switches añadidos a línea switchable {lid}: {fb}-{tb}")
             
             
 
@@ -190,8 +190,8 @@ class PPModel(mosaik_api.Simulator):
                 self.switch_plan = switch_plan
                 
             for sid, state in self.switch_plan.items():
-                if sid != 6:
-                    self.net.switch.at[int(sid), "closed"] = bool(state)
+                # if sid != 6:
+                self.net.switch.at[int(sid), "closed"] = bool(state)
             
             for lid, prob in self.fail_prob.items():
                 if self.line_status.get(lid,1) == 1 and np.random.rand() < prob:
@@ -464,7 +464,7 @@ class PPModel(mosaik_api.Simulator):
 
                 plt.plot(
                     [x0, x1], [y0, y1],
-                    color="green" if sw.closed else "red",
+                    color="green" if sw.closed and self.line_status.get(line, 1) else "red",
                     linewidth=1.3,
                     linestyle="--",
                     zorder=5

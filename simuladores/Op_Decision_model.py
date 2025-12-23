@@ -176,7 +176,7 @@ class OpDecisionModel(mosaik_api.Simulator):
             self.switches_buses.at[sid, "bus"] = self.lines.at[self.switches.at[sid,"element"], "from_bus"]
             self.switches_buses.at[sid, "element"] = self.lines.at[self.switches.at[sid,"element"], "to_bus"]
         # === LIMPIAR LINEAS FIJAS QUE SON SWITCHES
-        self.lines = self.lines.drop([12, 13, 14], errors="ignore")
+        # self.lines = self.lines.drop([12, 13, 14], errors="ignore")
 
         # === Correr optimización de switches ===
         # self.switch_plan = optimize_switches_gurobi(self.buses, self.lines, self.switches_buses, self.transformers, self.fail_prob)
