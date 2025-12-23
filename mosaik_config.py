@@ -1,47 +1,66 @@
 import mosaik
 
-import importlib
-import simuladores.wind_sim
-importlib.reload(simuladores.wind_sim)
+# import importlib
+# import simuladores.Climate_model
+# importlib.reload(simuladores.Climate_model)
 
 
 SIM_CONFIG = {
-    'WindSim2D': {'python': 'simuladores.wind_sim:WindSim2D'},
-    'FailureModel': {'python': 'simuladores.failure_model:FailureModel'},
-    'PyPSA_Sim': {'python': 'simuladores.pypsa_sim:PyPSASim'},
+    'ClimateModel': {'python': 'simuladores.Climate_model:ClimateModel'},
+    'FailureModel': {'python': 'simuladores.Failure_model:FailureModel'},
+    'PPModel': {'python': 'simuladores.PP_model:PPModel'},
+    'OpDecisionModel': {'python': 'simuladores.Op_Decision_model:OpDecisionModel'}
 }
 
 def main():
     world = mosaik.World(SIM_CONFIG)
 
-    wind = world.start('WindSim2D', time_resolution=3600)
-    failure = world.start('FailureModel', time_resolution=3600)
-    grid = world.start('PyPSA_Sim', time_resolution=3600)
+    # --- Inicialización de simuladores ---
+    print("⚙️ Iniciando simuladores...")
 
-    w = wind.WindSim2D.create(1)[0]
-    g = grid.PyPSA_Grid.create(1)[0]
+    climate = world.start('ClimateModel', step_size=3600)
+    failure = world.start('FailureModel', step_size=3600)
+    decision = world.start('OpDecisionModel', step_size=3600)
+    grid = world.start('PPModel', step_size=3600)
 
-    # Cantidad de líneas a simular (puedes leerla de tu red PyPSA si lo deseas)
-    # Obtener line_positions del grid antes de la simulación
-    grid_data = world.get_data({g: ['num_lines', 'line_positions']})
-    num_lines = list(grid_data.values())[0]['num_lines']
+    # --- Crear entidades ---
+    c = climate.ClimateModel.create(1)[0]
+    g = grid.PPModel.create(1)[0]
+
+    # --- Obtener posiciones de líneas del grid ---
+    grid_data = world.get_data({g: ['line_positions', 'line_status', 'lines', 'buses', 'transformers']})
     line_positions = list(grid_data.values())[0]['line_positions']
+    line_status = list(grid_data.values())[0]['line_status']
+    lines = list(grid_data.values())[0]['lines']
+    buses = list(grid_data.values())[0]['buses']
+    switches = list(grid_data.values())[0]['switches']
+    transformers = list(grid_data.values())[0]['transformers']
 
-    # 💡 Pasa line_positions como parámetro
-    failures = failure.FailureModel.create(num_lines, line_positions=line_positions)
-        
-    # --- Conexiones ---
-    # 1️⃣ El viento alimenta a todos los modelos de fallo
-    for f in failures:
-        world.connect(w, f, 'wind_speed', 'grid_lon', 'grid_lat', 'wind_shape')
-
+    # --- Crear entidades dependientes ---
+    f = failure.FailureModel.create(1, line_positions=line_positions)[0]
+    d = decision.OpDecisionModel.create(1)[0]
     
-    # 2️⃣ Cada modelo de fallo controla la red
-    for f in failures:
-        world.connect(f, g, ('line_status', 'line_status'))
+    # ================================================================
+    # CONEXIONES ENTRE SIMULADORES
+    # ================================================================
 
-    # 3️⃣ El viento también alimenta al grid directamente
-    world.connect(w, g, 'wind_speed', 'grid_lon', 'grid_lat', 'wind_shape')
+    # 🌀 Clima → Fallo
+    world.connect(c, f, 'gust_speed', 'grid_x', 'grid_y', 'shape')
+    
+    # El viento también alimenta al grid directamente
+    world.connect(c, g, 'gust_speed', 'grid_x', 'grid_y', 'shape')
+
+    # 🌀 Fallo → Decisión (probabilidades)
+    world.connect(f, d, 'fail_prob', 'fail_prob')
+
+    # 🌀 Fallo → Red (probabilidades)
+    world.connect(f, g, 'fail_prob','fail_prob')
+
+    # 🧩 Decisión → Red (plan de reparación)
+    world.connect(d, g, 'repair_plan', 'switch_plan')
+
+    # 🔁 Red → Decisión (estado actualizado)
+    world.connect(g, d, 'line_status', 'lines', 'buses', 'switches', 'transformers', time_shifted=True, initial_data={'line_status':line_status, 'lines':lines, 'buses':buses, 'switches':switches, 'transformers':transformers})
     
     # Ejecutar simulación por 24 horas
     world.run(until=24 * 3600)
