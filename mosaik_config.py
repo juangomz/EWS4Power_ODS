@@ -1,10 +1,5 @@
 import mosaik
 
-# import importlib
-# import simuladores.Climate_model
-# importlib.reload(simuladores.Climate_model)
-
-
 SIM_CONFIG = {
     'ClimateModel': {'python': 'simuladores.Climate_model:ClimateModel'},
     'FailureModel': {'python': 'simuladores.Failure_model:FailureModel'},
@@ -24,7 +19,7 @@ def main():
     grid = world.start('PPModel', step_size=3600)
 
     # --- Crear entidades ---
-    c = climate.ClimateModel.create(1)[0]
+    c = climate.ClimateModel.create(1, forecast_horizon=0)[0]
     g = grid.PPModel.create(1)[0]
 
     # --- Obtener posiciones de líneas del grid ---
@@ -45,10 +40,10 @@ def main():
     # ================================================================
 
     # 🌀 Clima → Fallo
-    world.connect(c, f, 'gust_speed', 'grid_x', 'grid_y', 'shape')
+    world.connect(c, f, 'climate', 'grid_x', 'grid_y', 'shape')
     
     # El viento también alimenta al grid directamente
-    world.connect(c, g, 'gust_speed', 'grid_x', 'grid_y', 'shape')
+    world.connect(c, g, 'climate', 'grid_x', 'grid_y', 'shape')
 
     # 🌀 Fallo → Decisión (probabilidades)
     world.connect(f, d, 'fail_prob', 'fail_prob')
@@ -63,12 +58,13 @@ def main():
     world.connect(g, d, 'line_status', 'lines', 'buses', 'switches', 'transformers', time_shifted=True, initial_data={'line_status':line_status, 'lines':lines, 'buses':buses, 'switches':switches, 'transformers':transformers})
     
     # Ejecutar simulación por 24 horas
+    
     world.run(until=24 * 3600)
 
 from pyinstrument import Profiler
 
 if __name__ == "__main__":
-    profiler = Profiler(interval=0.001, async_mode=True)
+    profiler = Profiler(interval=0.001, async_mode="enabled")
     profiler.start()
     print("🚀 Simulación iniciada (usa Ctrl+C para detener y ver el perfil)...")
 

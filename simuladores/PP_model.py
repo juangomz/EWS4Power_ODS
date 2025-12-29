@@ -43,7 +43,7 @@ META = {
                 'line_status', # PPModel output
                 'fail_prob', # FailureModel input
                 'repair_plan', # OpDecisionModel input
-                'gust_speed', # ClimateModel input
+                'climate', # ClimateModel input
                 'ens', # PPModel output (evaluation)
                 'line_positions',
                 'grid_x',
@@ -178,8 +178,13 @@ class PPModel(mosaik_api.Simulator):
             vals = inputs[src]
             
             if 'fail_prob' in vals:
-                fail_prob = list(vals['fail_prob'].values())[0]
-                self.fail_prob = fail_prob
+                fail_prob_all = list(vals['fail_prob'].values())[0]  # dict {k: {lid: q}}
+
+                # 👉 usar SOLO el presente (k = 0)
+                if isinstance(fail_prob_all, dict):
+                    self.fail_prob = fail_prob_all.get(0, {})
+                else:
+                    self.fail_prob = {}
                 
             if 'repair_plan' in vals:
                 repair_plan = list(vals['repair_plan'].values())[0]
@@ -190,7 +195,6 @@ class PPModel(mosaik_api.Simulator):
                 self.switch_plan = switch_plan
                 
             for sid, state in self.switch_plan.items():
-                # if sid != 6:
                 self.net.switch.at[int(sid), "closed"] = bool(state)
             
             for lid, prob in self.fail_prob.items():
@@ -201,8 +205,8 @@ class PPModel(mosaik_api.Simulator):
                 if data.get('finish_time',0) <= self.t * 3600:
                     self.line_status[lid] = 1
 
-            if 'gust_speed' in vals:
-                gust_speed = list(vals['gust_speed'].values())[0]
+            if 'climate' in vals:
+                gust_speed = list(vals["climate"].values())[0][0]["gust_speed"]
                 self.last_gust_speed = np.array(gust_speed)
 
             if 'grid_x' in vals:

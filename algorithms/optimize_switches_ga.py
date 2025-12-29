@@ -4,10 +4,12 @@ def optimize_switches_ga(
         self_switches_buses,
         self_transformers,
         self_fail_prob,
+        prev_switch_state=None,
         population_size=60,
-        generations=20,
+        generations=60,
         crossover_rate=0.8,
         mutation_rate=0.01,   # 🔹 mutación más suave (warm-start)
+        lambda_sw = 0,
         plot=True
     ):
     """
@@ -32,14 +34,6 @@ def optimize_switches_ga(
         slack = self_buses[self_buses["name"] == "Bus 0"].index[0]
     except:
         slack = buses[0]
-
-    # =============================
-    # PRE-CALCULAR p_l = 1 - q_l
-    # =============================
-    p_line = {}
-    for lid in lines:
-        q = float(self_fail_prob.get(lid, 0.0))
-        p_line[lid] = max(1.0 - q, 1e-6)
 
     # =============================
     # DETECTAR TERMINALES
@@ -67,108 +61,115 @@ def optimize_switches_ga(
     # =============================
     # FITNESS
     # =============================
-    def evaluate_fitness(switch_state):
+    def evaluate_fitness(switch_state, prev_switch_state):
+        total_score = 0.0
+        total_penalty = 0.0
+        for k, fail_prob_k in self_fail_prob.items():
+            
+            p_line = {
+                lid: max(1.0 - fail_prob_k.get(lid, 0.0), 1e-6)
+                for lid in lines
+            }
+            
+            G = nx.Graph()
+            for b in buses:
+                G.add_node(b)
 
-        G = nx.Graph()
-        for b in buses:
-            G.add_node(b)
+            # Líneas
+            line_map = {}
+            for lid in lines:
+                fb = int(self_lines.at[lid, "from_bus"])
+                tb = int(self_lines.at[lid, "to_bus"])
+                line_map[(fb, tb)] = lid
+                line_map[(tb, fb)] = lid  # importante
 
-        # Líneas
-        # line_map = {}
-        # for lid in lines:
-        #         fb = int(self_lines.at[lid, "from_bus"])
-        #         tb = int(self_lines.at[lid, "to_bus"])
-        #         if bool(self_lines.at[lid, "in_service"]):
-        #             line_map[(fb, tb)] = lid
-        #             G.add_edge(fb, tb, tipo="line", lid=lid)
-        line_map = {}
-        for lid in lines:
-            fb = int(self_lines.at[lid, "from_bus"])
-            tb = int(self_lines.at[lid, "to_bus"])
-            line_map[(fb, tb)] = lid
-            line_map[(tb, fb)] = lid  # importante
+            # Switches
+            for i, sid in enumerate(switches):
+                if switch_state[i] != 1:
+                    continue  # switch abierto → NO hay arista
 
-        # Switches
-        # for i, sid in enumerate(switches):
-        #     if switch_state[i] == 1:
-        #         a = int(self_switches_buses.at[sid, "bus"])
-        #         b = int(self_switches_buses.at[sid, "element"])
-        #         lid = line_map.get((a, b), None)
-        #         if lid is None:
-        #             continue 
-        #         G.add_edge(a, b, tipo="sw", sid=sid)
-        # Switches → controlan la existencia de la línea
-        for i, sid in enumerate(switches):
-            if switch_state[i] != 1:
-                continue  # switch abierto → NO hay arista
+                a = int(self_switches_buses.at[sid, "bus"])
+                b = int(self_switches_buses.at[sid, "element"])
 
-            a = int(self_switches_buses.at[sid, "bus"])
-            b = int(self_switches_buses.at[sid, "element"])
+                lid = line_map.get((a, b))
+                if lid is None:
+                    continue
 
-            lid = line_map.get((a, b))
-            if lid is None:
-                continue
+                # comprobar si la línea física está viva
+                if not bool(self_lines.at[lid, "in_service"]):
+                    continue
 
-            # comprobar si la línea física está viva
-            if not bool(self_lines.at[lid, "in_service"]):
-                continue
+                # SOLO ahora la arista existe
+                G.add_edge(a, b, tipo="line", lid=lid, sid=sid)
+            sid_index = {sid: i for i, sid in enumerate(switches)}
 
-            # SOLO ahora la arista existe
-            G.add_edge(a, b, tipo="line", lid=lid, sid=sid)
-        sid_index = {sid: i for i, sid in enumerate(switches)}
+            # Transformadores
+            for tid in transformers:
+                fb = int(self_transformers.at[tid, "hv_bus"])
+                tb = int(self_transformers.at[tid, "lv_bus"])
+                G.add_edge(fb, tb, tipo="trafo", tid=tid)
 
-        # Transformadores
-        for tid in transformers:
-            fb = int(self_transformers.at[tid, "hv_bus"])
-            tb = int(self_transformers.at[tid, "lv_bus"])
-            G.add_edge(fb, tb, tipo="trafo", tid=tid)
+            # Componente slack
+            if slack not in G:
+                return -1e3
 
-        # Componente slack
-        if slack not in G:
-            return -1e3
+            comp = nx.node_connected_component(G, slack)
+            H = G.subgraph(comp).copy()
 
-        comp = nx.node_connected_component(G, slack)
-        H = G.subgraph(comp).copy()
+            # 🔧 Reparar topología: romper ciclos antes de evaluar        
+            H, removed_sids = repair_to_radial(H, p_line)
+            
+            # 🔧 crear cromosoma reparado
+            repaired_ind = switch_state.copy()
+            for sid in removed_sids:
+                repaired_ind[sid_index[sid]] = 0
 
-        # 🔧 Reparar topología: romper ciclos antes de evaluar        
-        H, removed_sids = repair_to_radial(H, p_line)
+            # =============================
+            # Penalizaciones (CLAVE)
+            # =============================
+            penalty = 0.0
+
+            # nodos no conectados
+            penalty += (len(buses) - len(H.nodes())) + len(removed_sids)
+
+            # =============================
+            # Score por terminales
+            # =============================
+            score = 0.0
+
+            for b in buses:
+
+                if b == slack or b not in H.nodes():
+                    continue
+
+                path = nx.shortest_path(H, slack, b)
+
+                p_bus = 1.0
+                for u, v in zip(path[:-1], path[1:]):
+                    e = H.get_edge_data(u, v)
+                    if e["tipo"] == "trafo":
+                        p_bus *= 1
+                    else:
+                        p_bus *= p_line[e["lid"]]
+
+                score += p_bus
+                
+            total_score += score
+            total_penalty += penalty
         
-        # 🔧 crear cromosoma reparado
-        repaired_ind = switch_state.copy()
-        for sid in removed_sids:
-            repaired_ind[sid_index[sid]] = 0
+        # coste de switching
+        switch_cost = sum(
+            abs(repaired_ind[i] - prev_switch_state[i]) for i in range(len(repaired_ind))
+        )
 
-        # =============================
-        # Penalizaciones (CLAVE)
-        # =============================
-        penalty = 0.0
+        return total_score - total_penalty - lambda_sw*switch_cost, repaired_ind, switch_cost
+    
+    # =============================
+    # DISTANCIA DE HAMMING
+    # =============================
+    def switching_cost(x, x_prev):
+        return sum(abs(a - b) for a, b in zip(x, x_prev))
 
-        # nodos no conectados
-        penalty += (len(buses) - len(H.nodes())) + len(removed_sids)
-
-        # =============================
-        # Score por terminales
-        # =============================
-        score = 0.0
-
-        for b in buses:
-
-            if b == slack or b not in H.nodes():
-                continue
-
-            path = nx.shortest_path(H, slack, b)
-
-            p_bus = 1.0
-            for u, v in zip(path[:-1], path[1:]):
-                e = H.get_edge_data(u, v)
-                if e["tipo"] == "trafo":
-                    p_bus *= 1
-                else:
-                    p_bus *= p_line[e["lid"]]
-
-            score += p_bus
-
-        return score - penalty, repaired_ind
     
     # =============================
     # ASEGUTRADOR DE RADIALIDAD
@@ -201,7 +202,6 @@ def optimize_switches_ga(
                     worst_q = q
                     worst_edge = (u, v)
 
-            # 🔴 SOLO AQUÍ
             u, v = worst_edge
             attrs = H.get_edge_data(u, v)
             if "sid" in attrs:
@@ -215,11 +215,7 @@ def optimize_switches_ga(
     # =============================
     # OPERADORES GENÉTICOS
     # =============================
-    # def mutate(ind):
-    #     for i in range(len(ind)):
-    #         if random.random() < mutation_rate:
-    #             ind[i] = 1 - ind[i]
-    #     return ind
+
     def mutate(ind):
         # mutación swap con cierta probabilidad
         if random.random() < 0.3:
@@ -266,11 +262,9 @@ def optimize_switches_ga(
         return ind
 
     base_ind = base_individual_from_network()
-
-    # population = [base_ind.copy()]
-    # while len(population) < population_size:
-    #     ind = base_ind.copy()
-    #     population.append(mutate(ind))
+    
+    if prev_switch_state is None:
+        prev_switch_state = base_ind.copy()
     
     immigrant_rate = 0.3
     population = [base_ind.copy()]
@@ -292,28 +286,26 @@ def optimize_switches_ga(
     # LOOP GA
     # =============================
     best_global = base_ind.copy()
-    best_global_fit, best_global = evaluate_fitness(best_global)
+    best_global_fit, best_global, switches_changed = evaluate_fitness(best_global, prev_switch_state)
     history = []
-
+    
     for gen in range(generations):
 
-        evaluated = [evaluate_fitness(ind) for ind in population]
-        fitness = [f for f, _ in evaluated]
-        repaired_inds = [r for _, r in evaluated]
+        evaluated = [evaluate_fitness(ind, prev_switch_state=prev_switch_state) for ind in population]
+        fitness = [e[0] for e in evaluated]
+        repaired_inds = [e[1] for e in evaluated]
+        switch_costs = [e[2] for e in evaluated]
 
-        gen_best_idx = fitness.index(max(fitness))
-        gen_best_fit = fitness[gen_best_idx]
-        gen_best_ind = repaired_inds[gen_best_idx]
+        idx = fitness.index(max(fitness))
+        history.append(fitness[idx])
 
-        history.append(gen_best_fit)
+        if fitness[idx] > best_global_fit:
+            best_global_fit = fitness[idx]
+            best_global = repaired_inds[idx].copy()
+            switches_changed = switch_costs[idx]
 
-        if gen_best_fit > best_global_fit:
-            best_global_fit = gen_best_fit
-            best_global = gen_best_ind.copy()
-
-        # new_pop = [best_global.copy()]
-        new_pop = [gen_best_ind.copy()]
-
+        new_pop = [best_global.copy()]
+            
         while len(new_pop) < population_size:
             if random.random() < 0.2:
                 new_pop.append(random_individual())
@@ -340,4 +332,8 @@ def optimize_switches_ga(
         plt.savefig("figures/GA/convergence.png")
         plt.close()
 
-    return {sid: best_global[i] for i, sid in enumerate(switches)}
+    return {
+        "switch_state": {sid: best_global[i] for i, sid in enumerate(switches)},
+        "fitness": best_global_fit,
+        "switches_changed": switches_changed
+    }
