@@ -2,6 +2,8 @@ import mosaik_api
 from collections import deque  # para el BFS de downstream
 from algorithms.optimize_switches_gurobi import optimize_switches_gurobi
 from algorithms.optimize_switches_ga import optimize_switches_ga
+import pandas as pd
+import os
 
 META = {
     'api_version': '3.0',
@@ -44,13 +46,21 @@ class OpDecisionModel(mosaik_api.Simulator):
         self.switches_buses = None   # from-bus a to-bus. El modelo no le gusta recibir con lineas
         self.transformers = None
         
-        
+        self.lambda_sw = 0.2
+        self.records = []               # filas del CSV
+        self.switch_records = []        # inicialízalo en __init__
+        self.prev_switch_state = None   # estado anterior de switches
+        self.csv_path = None     
 
         # Para downstream
         self.graph = {}              # grafo from_bus -> [to_bus,...]
         self.initialized = False     # para calcular downstream una sola vez
 
     def init(self, sid, **sim_params):
+        csv_name = "GA_H0_L02"
+        os.makedirs("results", exist_ok=True)
+        self.csv_path = os.path.join("results", csv_name)
+            
         return META
 
     def create(self, num, model):
@@ -180,8 +190,35 @@ class OpDecisionModel(mosaik_api.Simulator):
 
         # === Correr optimización de switches ===
         # self.switch_plan = optimize_switches_gurobi(self.buses, self.lines, self.switches_buses, self.transformers, self.fail_prob)
-        self.switch_plan = optimize_switches_ga(self.buses, self.lines, self.switches_buses, self.transformers, self.fail_prob)
+        result = optimize_switches_ga(self.buses, self.lines, self.switches_buses, self.transformers, self.fail_prob, lambda_sw=self.lambda_sw)
+        self.switch_plan = result["switch_state"]
+        best_global_fit = result["fitness"]
+        switches_changed = result["switches_changed"]
+        
+        switch_cost = self.lambda_sw * switches_changed
+        total_cost = best_global_fit
 
+        self.records.append({
+            "time": time / 3600.0,
+            "total_cost": total_cost,
+            "switches_changed": switches_changed,
+            "switch_cost": switch_cost,
+})
+        df = pd.DataFrame(self.records)
+        df.to_csv(self.csv_path, index=False)
+    
+        t = time / 3600.0
+
+        for sw, state in self.switch_plan.items():
+            self.switch_records.append({
+                "time": t,
+                "switch": sw,
+                "state": state
+            })
+
+        df_switches = pd.DataFrame(self.switch_records)
+        df_switches.to_csv("results/switch_states_GA_H0_L02.csv", index=False)
+        
         return time + 3600  # paso 1 hora
 
     def get_data(self, outputs):
