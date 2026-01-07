@@ -18,7 +18,7 @@ META = {
                       'buses',
                       'switches',
                       'transformers',
-                      'switch_plan'
+                      'switch_plan',
             ],
         },
     },
@@ -33,7 +33,7 @@ class OpDecisionModel(mosaik_api.Simulator):
         self.line_status = {}        # Estado actual de las líneas {lid: 0/1}
         self.fail_prob = {}          # Probabilidad de fallo recibida {lid: p}
         self.failed_lines = set()    # Líneas caídas acumuladas
-        self.repair_time = 3600      # Tiempo mínimo para reparar (1h)
+        self.repair_time = 3600*2      # Tiempo mínimo para reparar (1h)
         self.resources = 2           # Cuadrillas
         self.ongoing_repairs = {}    # {line_id: finish_time}
         self.current_repair_plan = {}  # Se envía al grid
@@ -57,7 +57,7 @@ class OpDecisionModel(mosaik_api.Simulator):
         self.initialized = False     # para calcular downstream una sola vez
 
     def init(self, sid, **sim_params):
-        csv_name = "GA_H0_L02"
+        csv_name = "GA_PRUEBA"
         os.makedirs("results", exist_ok=True)
         self.csv_path = os.path.join("results", csv_name)
             
@@ -145,7 +145,7 @@ class OpDecisionModel(mosaik_api.Simulator):
 
         # === Detectar nuevas líneas caídas ===
         for lid, status in self.line_status.items():
-            if status == 0:  # caída
+            if status == 0 and lid not in self.ongoing_repairs:
                 self.failed_lines.add(lid)
                 
         # (De momento solo calculamos el plan, si luego quieres
@@ -167,12 +167,16 @@ class OpDecisionModel(mosaik_api.Simulator):
 
         # === Asignar cuadrillas libres a fallos pendientes ===
         free_crews = self.resources - len(self.ongoing_repairs)
+
         if free_crews > 0:
-            for lid in sorted(self.failed_lines):
+            pending = sorted(self.failed_lines - set(self.ongoing_repairs.keys()))
+            for lid in pending:
                 if free_crews <= 0:
                     break
+
                 finish = time + self.repair_time
                 self.ongoing_repairs[lid] = finish
+                self.failed_lines.discard(lid)   # <- clave: ya está asignada
                 free_crews -= 1
 
         # === Generar repair_plan para grid ===
@@ -206,18 +210,6 @@ class OpDecisionModel(mosaik_api.Simulator):
 })
         df = pd.DataFrame(self.records)
         df.to_csv(self.csv_path, index=False)
-    
-        t = time / 3600.0
-
-        for sw, state in self.switch_plan.items():
-            self.switch_records.append({
-                "time": t,
-                "switch": sw,
-                "state": state
-            })
-
-        df_switches = pd.DataFrame(self.switch_records)
-        df_switches.to_csv("results/switch_states_GA_H0_L02.csv", index=False)
         
         return time + 3600  # paso 1 hora
 
@@ -225,7 +217,6 @@ class OpDecisionModel(mosaik_api.Simulator):
         return {
             'OpDecisionModel': {
                 'repair_plan': self.current_repair_plan,
-                'line_status': self.line_status,
-                'switch_plan': self.switch_plan
+                'switch_plan': self.switch_plan,
             }
         }

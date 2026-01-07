@@ -53,7 +53,7 @@ META = {
                 'buses',
                 'switches',
                 'transformers',
-                'switch_plan'
+                'switch_plan',
             ],
         }
     },
@@ -74,6 +74,7 @@ class PPModel(mosaik_api.Simulator):
         self.current_metrics = {}
         self.t = 0
         self.R_curve = {}
+        self.switch_records = []
         
     # =============================================================
     # INITIALIZATION
@@ -220,6 +221,21 @@ class PPModel(mosaik_api.Simulator):
         for lid, status in self.line_status.items():
             self.net.line.at[lid, 'in_service'] = bool(status)
 
+        t = time / 3600.0
+
+        for sw, state in self.switch_plan.items():
+            line_id = self.net.switch.at[sw, "element"]
+            sw_in_service = bool(self.net.line.at[line_id, "in_service"])
+            self.switch_records.append({
+                "time": t,
+                "switch": sw,
+                "state": state,
+                "sw_in_service": sw_in_service
+            })
+
+        df_switches = pd.DataFrame(self.switch_records)
+        df_switches.to_csv("results/switch_states_GA_PRUEBA.csv", index=False)
+        
         # Calcular flujo DC
         try:
             pp.runpp(self.net)
@@ -451,7 +467,7 @@ class PPModel(mosaik_api.Simulator):
         # =======================================
         # 4) DIBUJAR SWITCHES
         # =======================================
-        for _, sw in net.switch.iterrows():
+        for sw_id, sw in net.switch.iterrows():
 
             # ---- bus-line switch ----
             if sw.et == "l":
@@ -489,6 +505,26 @@ class PPModel(mosaik_api.Simulator):
                     linestyle="--",
                     zorder=5
                 )
+                
+            # ---- label en el punto medio ----
+            xm = 0.5 * (x0 + x1)
+            ym = 0.5 * (y0 + y1)
+
+            plt.text(
+                xm, ym,
+                f"S{sw_id}",
+                fontsize=7,
+                color="black",
+                ha="center",
+                va="center",
+                zorder=6,
+                bbox=dict(
+                    facecolor="white",
+                    edgecolor="none",
+                    alpha=0.7,
+                    pad=0.8
+                )
+            )
                 
         # =======================================
         # 5) DIBUJAR TRANSFORMADORES (hv_bus ↔ lv_bus)

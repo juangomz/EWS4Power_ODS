@@ -84,23 +84,25 @@ def optimize_switches_ga(
                 line_map[(tb, fb)] = lid  # importante
 
             # Switches
+            effective_ind = switch_state.copy()
             for i, sid in enumerate(switches):
                 if switch_state[i] != 1:
-                    continue  # switch abierto → NO hay arista
+                    continue
 
                 a = int(self_switches_buses.at[sid, "bus"])
                 b = int(self_switches_buses.at[sid, "element"])
 
                 lid = line_map.get((a, b))
                 if lid is None:
+                    effective_ind[i] = 0
                     continue
 
-                # comprobar si la línea física está viva
                 if not bool(self_lines.at[lid, "in_service"]):
-                    continue
+                    effective_ind[i] = 0
 
                 # SOLO ahora la arista existe
                 G.add_edge(a, b, tipo="line", lid=lid, sid=sid)
+                
             sid_index = {sid: i for i, sid in enumerate(switches)}
 
             # Transformadores
@@ -120,9 +122,9 @@ def optimize_switches_ga(
             H, removed_sids = repair_to_radial(H, p_line)
             
             # 🔧 crear cromosoma reparado
-            repaired_ind = switch_state.copy()
+            radial_ind = effective_ind.copy()
             for sid in removed_sids:
-                repaired_ind[sid_index[sid]] = 0
+                radial_ind[sid_index[sid]] = 0
 
             # =============================
             # Penalizaciones (CLAVE)
@@ -159,10 +161,10 @@ def optimize_switches_ga(
         
         # coste de switching
         switch_cost = sum(
-            abs(repaired_ind[i] - prev_switch_state[i]) for i in range(len(repaired_ind))
+            abs(radial_ind[i] - prev_switch_state[i]) for i in range(len(radial_ind))
         )
 
-        return total_score - total_penalty - lambda_sw*switch_cost, repaired_ind, switch_cost
+        return total_score - total_penalty - lambda_sw*switch_cost, radial_ind, switch_cost
     
     # =============================
     # DISTANCIA DE HAMMING
