@@ -18,6 +18,7 @@ META = {
                       'buses',
                       'switches',
                       'transformers',
+                      'loads',
                       'switch_plan',
             ],
         },
@@ -45,8 +46,10 @@ class OpDecisionModel(mosaik_api.Simulator):
         self.switches = None         # DataFrame o dict de switches bus-bus
         self.switches_buses = None   # from-bus a to-bus. El modelo no le gusta recibir con lineas
         self.transformers = None
+        self.loads = None
         
-        self.lambda_sw = 0.2
+        self.lambda_sw = 0
+        self.enable_switching = True
         self.records = []               # filas del CSV
         self.switch_records = []        # inicialízalo en __init__
         self.prev_switch_state = None   # estado anterior de switches
@@ -136,6 +139,8 @@ class OpDecisionModel(mosaik_api.Simulator):
                 self.switches = list(vals['switches'].values())[0]
             if 'transformers' in vals:
                 self.transformers = list(vals['transformers'].values())[0]
+            if 'loads' in vals:
+                self.loads = list(vals['loads'].values())[0]
 
         # Inicializar grafo + downstream una sola vez (cuando ya tenemos líneas)
         if not self.initialized and self.lines is not None:
@@ -174,7 +179,7 @@ class OpDecisionModel(mosaik_api.Simulator):
                 if free_crews <= 0:
                     break
 
-                finish = time + self.repair_time
+                finish = time + self.repair_time - 3600
                 self.ongoing_repairs[lid] = finish
                 self.failed_lines.discard(lid)   # <- clave: ya está asignada
                 free_crews -= 1
@@ -194,10 +199,31 @@ class OpDecisionModel(mosaik_api.Simulator):
 
         # === Correr optimización de switches ===
         # self.switch_plan = optimize_switches_gurobi(self.buses, self.lines, self.switches_buses, self.transformers, self.fail_prob)
-        result = optimize_switches_ga(self.buses, self.lines, self.switches_buses, self.transformers, self.fail_prob, lambda_sw=self.lambda_sw)
-        self.switch_plan = result["switch_state"]
-        best_global_fit = result["fitness"]
-        switches_changed = result["switches_changed"]
+        
+        if self.enable_switching:
+            result = optimize_switches_ga(
+                self.buses,
+                self.lines,
+                self.switches_buses,
+                self.transformers,
+                self.loads,
+                self.fail_prob,
+                lambda_sw=self.lambda_sw
+            )
+            self.switch_plan = result["switch_state"]
+            best_global_fit = result["fitness"]
+            switches_changed = result["switches_changed"]
+        else:
+            # 🔒 Baseline: mantener estado actual de los switches
+            self.switch_plan = {
+                sid: int(self.switches.at[sid, "closed"])
+                for sid in self.switches.index
+            }
+            # métricas coherentes para baseline
+            best_global_fit = None
+            switches_changed = 0
+                    
+        # result = optimize_switches_ga(self.buses, self.lines, self.switches_buses, self.transformers, self.fail_prob, lambda_sw=self.lambda_sw)        
         
         switch_cost = self.lambda_sw * switches_changed
         total_cost = best_global_fit

@@ -8,8 +8,7 @@ import matplotlib.pyplot as plt
 import networkx as nx
 from simuladores.logger import Logger
 import json
-
-np.random.seed(2025)   # cualquier número fijo
+from pandapower.networks import create_cigre_network_mv
 
 data_dir = './data/red_electrica'
 
@@ -53,6 +52,7 @@ META = {
                 'buses',
                 'switches',
                 'transformers',
+                'loads',
                 'switch_plan',
             ],
         }
@@ -75,6 +75,7 @@ class PPModel(mosaik_api.Simulator):
         self.t = 0
         self.R_curve = {}
         self.switch_records = []
+        self.rng_sim = np.random.default_rng(2025)
         
     # =============================================================
     # INITIALIZATION
@@ -111,6 +112,7 @@ class PPModel(mosaik_api.Simulator):
         # ============================
         try:
             self.net = net_cigre15_mv(IN_PATH)
+            # self.net = create_cigre_network_mv(with_der=False)
         except Exception as e:
             print(f"❌ Error cargando red CIGRE: {e}")
             raise e
@@ -199,7 +201,7 @@ class PPModel(mosaik_api.Simulator):
                 self.net.switch.at[int(sid), "closed"] = bool(state)
             
             for lid, prob in self.fail_prob.items():
-                if self.line_status.get(lid,1) == 1 and np.random.rand() < prob:
+                if self.line_status.get(lid,1) == 1 and self.rng_sim.random() < prob:
                     self.line_status[lid] = 0
                     
             for lid, data in self.repair_plan.items():
@@ -273,22 +275,73 @@ class PPModel(mosaik_api.Simulator):
 
         return time + 3600
     
+    # def plot_R_curve(self):
+    #     import matplotlib.pyplot as plt, os
+    #     R = self.current_metrics.get("R_curve", {})
+    #     if not R:
+    #         return
+    #     times = list(R.keys())
+    #     values = [float(v) for v in R.values()]
+    #     os.makedirs("results", exist_ok=True)
+    #     plt.plot(times, values, marker="o")
+    #     plt.title("Curva de Resiliencia R(t)")
+    #     plt.xlabel("Hora")
+    #     plt.ylabel("R(t)")
+    #     plt.grid(alpha=0.4)
+    #     plt.savefig("results/R_curve.png", dpi=200)
+    #     plt.close()
+    #     print("Guardada R_curve en results/R_curve.png")
     def plot_R_curve(self):
-        import matplotlib.pyplot as plt, os
+        import os
+        import numpy as np
+        import matplotlib as mpl
+        import matplotlib.pyplot as plt
+
         R = self.current_metrics.get("R_curve", {})
         if not R:
             return
-        times = list(R.keys())
-        values = [float(v) for v in R.values()]
+
         os.makedirs("results", exist_ok=True)
-        plt.plot(times, values, marker="o")
-        plt.title("Curva de Resiliencia R(t)")
-        plt.xlabel("Hora")
-        plt.ylabel("R(t)")
-        plt.grid(alpha=0.4)
-        plt.savefig("results/R_curve.png", dpi=200)
-        plt.close()
-        print("Guardada R_curve en results/R_curve.png")
+
+        mpl.rcParams.update({
+            "font.family": "serif",
+            "font.size": 9,
+            "axes.labelsize": 9,
+            "axes.titlesize": 10,
+            "xtick.labelsize": 8,
+            "ytick.labelsize": 8,
+            "axes.linewidth": 0.8,
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+        })
+
+        times = np.array(sorted(R.keys()), dtype=float)   # horas (0..23)
+        values = np.array([float(R[t]) for t in times], dtype=float)
+
+        # opcional: pérdida de resiliencia (área)
+        dt = 1.0  # 1h
+        R_loss = float(np.sum((1.0 - values) * dt))
+
+        fig, ax = plt.subplots(figsize=(6.2, 2.8))
+        ax.plot(times, values, marker="o", markersize=3, linewidth=1.4)
+
+        ax.set_title(f"Resilience curve R(t)  (loss = {R_loss:.2f} h)")
+        ax.set_xlabel("Time [h]")
+        ax.set_ylabel("R(t) = served/expected")
+        ax.set_ylim(0.0, 1.02)
+        ax.set_xlim(times.min(), times.max())
+        ax.grid(alpha=0.25)
+
+        # sombreado opcional (muy visual, pero sobrio)
+        ax.fill_between(times, values, 1.0, alpha=0.12)
+
+        fig.tight_layout()
+        fig.savefig("results/R_curve.pdf", bbox_inches="tight")
+        fig.savefig("results/R_curve.png", dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+        print("Guardada R_curve en results/R_curve.pdf / .png")
+
 
     # ==============================================================
     # UTILIDADES
@@ -343,18 +396,39 @@ class PPModel(mosaik_api.Simulator):
                 'buses': self.net.bus,
                 'switches': self.net.switch,
                 'transformers': self.net.trafo,
+                'loads': self.net.load,
             }
         }
 
     def plot_network(self, hour):
+        import os
+        import numpy as np
+        import matplotlib as mpl
         import matplotlib.pyplot as plt
         import networkx as nx
-        import numpy as np
         import pandapower.topology as top
-        import os
+        from matplotlib.lines import Line2D
+        from matplotlib.patches import Patch
 
-        plt.figure(figsize=(8, 6))
+        # -------------------------
+        # Paper-like rcParams (local)
+        # -------------------------
+        mpl.rcParams.update({
+            "font.family": "serif",
+            "font.size": 9,
+            "axes.titlesize": 10,
+            "axes.labelsize": 9,
+            "xtick.labelsize": 8,
+            "ytick.labelsize": 8,
+            "axes.linewidth": 0.8,
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+        })
+
+        os.makedirs("figures", exist_ok=True)
+
         net = self.net
+        fig, ax = plt.subplots(figsize=(7.2, 5.2))  # buen tamaño 1-col / 1.5-col
 
         # =======================================
         #  GRAFO REAL (respeta switches)
@@ -362,205 +436,451 @@ class PPModel(mosaik_api.Simulator):
         G = top.create_nxgraph(net, respect_switches=True, include_out_of_service=False)
 
         # =======================================
-        # POSICIONES (convertir a km y centrar)
+        # POSICIONES (km y centrado)
         # =======================================
         FT_TO_KM = 0.0003048
-        pos_km = {
-            bus: (float(net.bus.at[bus, "x"]) * FT_TO_KM,
-                float(net.bus.at[bus, "y"]) * FT_TO_KM)
-            for bus in net.bus.index
-        }
+        pos_km = {}
+        for bus in net.bus.index:
+            x = float(net.bus.at[bus, "x"]) * FT_TO_KM
+            y = float(net.bus.at[bus, "y"]) * FT_TO_KM
+            pos_km[bus] = (x, y)
 
-        # Centrado
-        xs = [p[0] for p in pos_km.values()]
-        ys = [p[1] for p in pos_km.values()]
-        x_mean, y_mean = np.mean(xs), np.mean(ys)
+        xs = np.array([p[0] for p in pos_km.values()])
+        ys = np.array([p[1] for p in pos_km.values()])
+        x_mean, y_mean = xs.mean(), ys.mean()
         pos_km = {b: (pos_km[b][0] - x_mean, pos_km[b][1] - y_mean) for b in pos_km}
 
+        # Solo nodos presentes en el grafo
+        nodes = list(G.nodes())
+        pos = {n: pos_km[n] for n in nodes}
+
         # =======================================
-        # 1) DIBUJAR VIENTO
+        # 1) VIENTO (fondo)
         # =======================================
         if hasattr(self, "last_gust_speed") and isinstance(self.last_gust_speed, np.ndarray):
             if hasattr(self, "grid_x") and hasattr(self, "grid_y"):
                 X, Y = np.meshgrid(self.grid_x, self.grid_y)
-                plt.imshow(
+
+                im = ax.imshow(
                     self.last_gust_speed,
                     origin="lower",
                     cmap="coolwarm",
-                    alpha=0.5,
+                    alpha=0.2,  # más suave que antes
                     extent=[X.min(), X.max(), Y.min(), Y.max()],
-                    vmin=0, vmax=30
+                    vmin=15, vmax=30,
+                    zorder=0
                 )
-                plt.colorbar(label="Velocidad del viento [m/s]", shrink=0.7)
+
+                cbar = fig.colorbar(im, ax=ax, fraction=0.035, pad=0.02)
+                cbar.set_label("Gust speed [m/s]")
+                cbar.ax.tick_params(labelsize=7)
 
         # =======================================
-        # 2) BUSES ENERGIZADOS (topología real)
+        # 2) BUSES energizados vs no
         # =======================================
         slack_bus = int(net.ext_grid.bus.values[0])
         energized = set(nx.node_connected_component(G, slack_bus)) if slack_bus in G else set()
 
-        nodes = list(G.nodes())
-        pos_filtered = {n: pos_km[n] for n in nodes}
+        # Nodos: slack / energizado / no energizado
+        slack_nodes = [slack_bus] if slack_bus in nodes else []
+        energ_nodes = [n for n in nodes if (n in energized and n != slack_bus)]
+        dead_nodes  = [n for n in nodes if n not in energized]
 
-        node_colors = []
-        node_sizes = []
-
-        for b in nodes:
-            if b == slack_bus:
-                node_colors.append("limegreen")
-                node_sizes.append(20)
-            elif b in energized:
-                node_colors.append("green")
-                node_sizes.append(10)
-            else:
-                node_colors.append("red")
-                node_sizes.append(10)
-
-        nx.draw_networkx_nodes(
-            G,
-            pos_filtered,
-            nodelist=nodes,
-            node_color=node_colors,
-            node_size=node_sizes,
-            edgecolors="black"
+        # Dibujar nodos por capas (mejor control visual)
+        ax.scatter(
+            [pos[n][0] for n in energ_nodes],
+            [pos[n][1] for n in energ_nodes],
+            s=18, marker="o", edgecolors="black", linewidths=0.4,
+            zorder=3
         )
-        
-        # =======================================
-        # DIBUJAR NOMBRES DE LOS NODOS
-        # =======================================
-        for bus_idx in nodes:
-            x, y = pos_filtered[bus_idx]
-            label = str(net.bus.at[bus_idx, "name"])
-            
-            plt.text(
-                x, y + 0.03,          # pequeño desplazamiento vertical
-                label,
-                fontsize=7,
-                ha="center",
-                va="bottom"
-            )
+        ax.scatter(
+            [pos[n][0] for n in dead_nodes],
+            [pos[n][1] for n in dead_nodes],
+            s=18, marker="o", edgecolors="black", linewidths=0.4,
+            zorder=3
+        )
+        ax.scatter(
+            [pos[n][0] for n in slack_nodes],
+            [pos[n][1] for n in slack_nodes],
+            s=38, marker="s", edgecolors="black", linewidths=0.6,
+            zorder=4
+        )
+
+        # Colores a posteriori (evitamos hardcode raro en scatter)
+        # (Matplotlib no permite fácil mezcla por llamada, así que recoloreamos)
+        # Simple: dibujar de nuevo con color específico encima
+        ax.scatter([pos[n][0] for n in energ_nodes], [pos[n][1] for n in energ_nodes], s=18, marker="o",
+                color="gray", zorder=3)
+        ax.scatter([pos[n][0] for n in dead_nodes],  [pos[n][1] for n in dead_nodes],  s=18, marker="o",
+                color="lightgray", zorder=3)
+        ax.scatter([pos[n][0] for n in slack_nodes], [pos[n][1] for n in slack_nodes], s=38, marker="s",
+                color="white", zorder=4)
+
+        # Etiquetas (solo si no satura)
+        # Si tienes muchos buses, esto puede ensuciar. Actívalo solo para demo.
+        show_labels = False
+        if show_labels:
+            for n in nodes:
+                x, y = pos[n]
+                name = str(net.bus.at[n, "name"])
+                ax.text(x, y + 0.03, name, fontsize=7, ha="center", va="bottom", zorder=6)
 
         # =======================================
-        # 3) DIBUJAR LÍNEAS NO SWITCHABLES
+        # 3) LÍNEAS NO switchables (base)
         # =======================================
         switchable_lines = set(net.switch[net.switch.et == "l"].element.values)
 
         for lid in net.line.index:
             if lid in switchable_lines:
-                continue  # ❌ NO dibujar líneas conmutables
+                continue
 
-            fb = net.line.at[lid, "from_bus"]
-            tb = net.line.at[lid, "to_bus"]
+            fb = int(net.line.at[lid, "from_bus"])
+            tb = int(net.line.at[lid, "to_bus"])
+            if fb not in pos_km or tb not in pos_km:
+                continue
 
-            if fb in pos_km and tb in pos_km:
-                x0, y0 = pos_km[fb]
-                x1, y1 = pos_km[tb]
+            x0, y0 = pos_km[fb]
+            x1, y1 = pos_km[tb]
 
-                plt.plot(
-                    [x0, x1], [y0, y1],
-                    color="green" if self.line_status.get(lid, 1) == 1 else "red",
-                    linestyle="-",
-                    linewidth=0.8,
-                    alpha=0.8,
-                )
+            ok = (self.line_status.get(lid, 1) == 1)
+            ax.plot(
+                [x0, x1], [y0, y1],
+                color="black" if ok else "red",
+                linewidth=0.9,
+                alpha=0.9,
+                zorder=1
+            )
 
         # =======================================
-        # 4) DIBUJAR SWITCHES
+        # 4) SWITCHES (paper convention)
+        #   white = closed, black = open, red = failed line (override)
+        #   Use double stroke so white is visible.
         # =======================================
+        def draw_switch_segment(x0, y0, x1, y1, color, z=5):
+            # base outline for visibility (esp. white)
+            ax.plot([x0, x1], [y0, y1], color="gray", linewidth=2.2, linestyle="--", zorder=z-1)
+            ax.plot([x0, x1], [y0, y1], color=color,  linewidth=1.4, linestyle="--", zorder=z)
+
         for sw_id, sw in net.switch.iterrows():
+            x0 = y0 = x1 = y1 = None
 
-            # ---- bus-line switch ----
             if sw.et == "l":
-                line = sw.element
-                bus = sw.bus
+                line = int(sw.element)
+                bus = int(sw.bus)
 
-                fb = net.line.at[line, "from_bus"]
-                tb = net.line.at[line, "to_bus"]
-
+                fb = int(net.line.at[line, "from_bus"])
+                tb = int(net.line.at[line, "to_bus"])
                 other_bus = tb if bus == fb else fb
 
                 x0, y0 = pos_km[bus]
                 x1, y1 = pos_km[other_bus]
 
-                plt.plot(
-                    [x0, x1], [y0, y1],
-                    color="green" if sw.closed and self.line_status.get(line, 1) else "red",
-                    linewidth=1.3,
-                    linestyle="--",
-                    zorder=5
-                )
+                line_ok = (self.line_status.get(line, 1) == 1)
+                is_closed = bool(sw.closed)
 
-            # ---- bus-bus switch ----
+                # priority: failure -> red
+                if not line_ok:
+                    col = "red"
+                elif is_closed:
+                    col = "white"
+                else:
+                    col = "black"
+
+                draw_switch_segment(x0, y0, x1, y1, col, z=5)
+
             elif sw.et == "b":
-                b1 = sw.bus
-                b2 = sw.element
-
+                b1 = int(sw.bus)
+                b2 = int(sw.element)
                 x0, y0 = pos_km[b1]
                 x1, y1 = pos_km[b2]
 
-                plt.plot(
-                    [x0, x1], [y0, y1],
-                    color="green" if sw.closed else "red",
-                    linewidth=1.3,
-                    linestyle="--",
-                    zorder=5
-                )
-                
-            # ---- label en el punto medio ----
-            xm = 0.5 * (x0 + x1)
-            ym = 0.5 * (y0 + y1)
+                is_closed = bool(sw.closed)
+                col = "white" if is_closed else "black"
+                draw_switch_segment(x0, y0, x1, y1, col, z=5)
 
-            plt.text(
-                xm, ym,
-                f"S{sw_id}",
-                fontsize=7,
-                color="black",
-                ha="center",
-                va="center",
-                zorder=6,
-                bbox=dict(
-                    facecolor="white",
-                    edgecolor="none",
-                    alpha=0.7,
-                    pad=0.8
-                )
-            )
-                
-        # =======================================
-        # 5) DIBUJAR TRANSFORMADORES (hv_bus ↔ lv_bus)
-        # =======================================
+            # label switch id at midpoint (optional)
+            # if x0 is not None:
+            #     xm, ym = 0.5 * (x0 + x1), 0.5 * (y0 + y1)
+            #     ax.text(
+            #         xm, ym, f"S{int(sw_id)}",
+            #         fontsize=7, color="black",
+            #         ha="center", va="center",
+            #         zorder=6,
+            #         bbox=dict(facecolor="white", edgecolor="none", alpha=0.75, pad=0.6)
+            #     )
 
+        # =======================================
+        # 5) TRANSFORMADORES
+        # =======================================
         for tid, trafo in net.trafo.iterrows():
-            hv = trafo.hv_bus
-            lv = trafo.lv_bus
+            hv = int(trafo.hv_bus)
+            lv = int(trafo.lv_bus)
+            if hv not in pos_km or lv not in pos_km:
+                continue
 
-            if hv in pos_km and lv in pos_km:
-                x0, y0 = pos_km[hv]
-                x1, y1 = pos_km[lv]
-
-                plt.plot(
-                    [x0, x1], [y0, y1],
-                    color="blue",
-                    linewidth=1.0,
-                    linestyle="--",
-                    alpha=0.9,
-                    zorder=3,
-                )
-
-                # Opcional: etiqueta del trafo
-                mx, my = (x0 + x1) / 2, (y0 + y1) / 2
-                plt.text(mx, my + 0.03, f"T{tid}", color="blue", fontsize=7, ha="center")
+            x0, y0 = pos_km[hv]
+            x1, y1 = pos_km[lv]
+            ax.plot(
+                [x0, x1], [y0, y1],
+                color="blue",
+                linewidth=1.0,
+                linestyle="-.",
+                alpha=0.9,
+                zorder=2
+            )
 
         # =======================================
-        # 6) FORMATO + GUARDADO
+        # Leyenda (manual, paper-style)
         # =======================================
-        plt.title(f"Red CIGRE - Topología y viento (t = {hour} h)")
-        plt.xlabel("Distancia Este–Oeste [km]")
-        plt.ylabel("Distancia Norte–Sur [km]")
-        plt.gca().set_aspect("equal", adjustable="box")
-        plt.grid(alpha=0.3)
-        plt.tight_layout()
+        legend_items = [
+            Line2D([0],[0], marker="s", color="w", markerfacecolor="white",
+                markeredgecolor="black", markersize=6, label="Slack bus"),
+            Line2D([0],[0], marker="o", color="w", markerfacecolor="gray",
+                markeredgecolor="black", markersize=5, label="Energized bus"),
+            Line2D([0],[0], marker="o", color="w", markerfacecolor="lightgray",
+                markeredgecolor="black", markersize=5, label="De-energized bus"),
+            Line2D([0],[0], color="black", linewidth=1.0, label="Line in service"),
+            Line2D([0],[0], color="red", linewidth=1.0, label="Line out of service"),
+            Line2D([0],[0], color="black", linestyle="--", linewidth=1.4, label="Switch open"),
+            Line2D([0],[0], color="white", linestyle="--", linewidth=1.4, label="Switch closed"),
+        ]
+        ax.legend(
+            handles=legend_items,
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.08),
+            ncol=3,
+            frameon=True
+        )
 
-        os.makedirs("figures", exist_ok=True)
-        plt.savefig(f"figures/hour_{hour:02d}.png", dpi=200, bbox_inches="tight")
-        plt.close()
+        # =======================================
+        # Layout + save (PDF + PNG)
+        # =======================================
+        ax.set_title(f"CIGRE MV network state (t = {hour} h)")
+        ax.set_xlabel("East–West distance [km]")
+        ax.set_ylabel("North–South distance [km]")
+        ax.set_aspect("equal", adjustable="box")
+        ax.grid(alpha=0.2)
+
+        fig.tight_layout()
+        fig.savefig(f"figures/network_state_t{hour:02d}.pdf", bbox_inches="tight")
+        fig.savefig(f"figures/network_state_t{hour:02d}.png", dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+    # def plot_network(self, hour):
+    #     import matplotlib.pyplot as plt
+    #     import networkx as nx
+    #     import numpy as np
+    #     import pandapower.topology as top
+    #     import os
+
+    #     plt.figure(figsize=(8, 6))
+    #     net = self.net
+
+    #     # =======================================
+    #     #  GRAFO REAL (respeta switches)
+    #     # =======================================
+    #     G = top.create_nxgraph(net, respect_switches=True, include_out_of_service=False)
+
+    #     # =======================================
+    #     # POSICIONES (convertir a km y centrar)
+    #     # =======================================
+    #     FT_TO_KM = 0.0003048
+    #     pos_km = {
+    #         bus: (float(net.bus.at[bus, "x"]) * FT_TO_KM,
+    #             float(net.bus.at[bus, "y"]) * FT_TO_KM)
+    #         for bus in net.bus.index
+    #     }
+
+    #     # Centrado
+    #     xs = [p[0] for p in pos_km.values()]
+    #     ys = [p[1] for p in pos_km.values()]
+    #     x_mean, y_mean = np.mean(xs), np.mean(ys)
+    #     pos_km = {b: (pos_km[b][0] - x_mean, pos_km[b][1] - y_mean) for b in pos_km}
+
+    #     # =======================================
+    #     # 1) DIBUJAR VIENTO
+    #     # =======================================
+    #     if hasattr(self, "last_gust_speed") and isinstance(self.last_gust_speed, np.ndarray):
+    #         if hasattr(self, "grid_x") and hasattr(self, "grid_y"):
+    #             X, Y = np.meshgrid(self.grid_x, self.grid_y)
+    #             plt.imshow(
+    #                 self.last_gust_speed,
+    #                 origin="lower",
+    #                 cmap="coolwarm",
+    #                 alpha=0.5,
+    #                 extent=[X.min(), X.max(), Y.min(), Y.max()],
+    #                 vmin=10, vmax=30
+    #             )
+    #             plt.colorbar(label="Velocidad del viento [m/s]", shrink=0.7)
+
+    #     # =======================================
+    #     # 2) BUSES ENERGIZADOS (topología real)
+    #     # =======================================
+    #     slack_bus = int(net.ext_grid.bus.values[0])
+    #     energized = set(nx.node_connected_component(G, slack_bus)) if slack_bus in G else set()
+
+    #     nodes = list(G.nodes())
+    #     pos_filtered = {n: pos_km[n] for n in nodes}
+
+    #     node_colors = []
+    #     node_sizes = []
+
+    #     for b in nodes:
+    #         if b == slack_bus:
+    #             node_colors.append("limegreen")
+    #             node_sizes.append(20)
+    #         elif b in energized:
+    #             node_colors.append("green")
+    #             node_sizes.append(10)
+    #         else:
+    #             node_colors.append("red")
+    #             node_sizes.append(10)
+
+    #     nx.draw_networkx_nodes(
+    #         G,
+    #         pos_filtered,
+    #         nodelist=nodes,
+    #         node_color=node_colors,
+    #         node_size=node_sizes,
+    #         edgecolors="black"
+    #     )
+        
+    #     # =======================================
+    #     # DIBUJAR NOMBRES DE LOS NODOS
+    #     # =======================================
+    #     for bus_idx in nodes:
+    #         x, y = pos_filtered[bus_idx]
+    #         label = str(net.bus.at[bus_idx, "name"])
+            
+    #         plt.text(
+    #             x, y + 0.03,          # pequeño desplazamiento vertical
+    #             label,
+    #             fontsize=7,
+    #             ha="center",
+    #             va="bottom"
+    #         )
+
+    #     # =======================================
+    #     # 3) DIBUJAR LÍNEAS NO SWITCHABLES
+    #     # =======================================
+    #     switchable_lines = set(net.switch[net.switch.et == "l"].element.values)
+
+    #     for lid in net.line.index:
+    #         if lid in switchable_lines:
+    #             continue  # ❌ NO dibujar líneas conmutables
+
+    #         fb = net.line.at[lid, "from_bus"]
+    #         tb = net.line.at[lid, "to_bus"]
+
+    #         if fb in pos_km and tb in pos_km:
+    #             x0, y0 = pos_km[fb]
+    #             x1, y1 = pos_km[tb]
+
+    #             plt.plot(
+    #                 [x0, x1], [y0, y1],
+    #                 color="green" if self.line_status.get(lid, 1) == 1 else "red",
+    #                 linestyle="-",
+    #                 linewidth=0.8,
+    #                 alpha=0.8,
+    #             )
+
+    #     # =======================================
+    #     # 4) DIBUJAR SWITCHES
+    #     # =======================================
+    #     for sw_id, sw in net.switch.iterrows():
+
+    #         # ---- bus-line switch ----
+    #         if sw.et == "l":
+    #             line = sw.element
+    #             bus = sw.bus
+
+    #             fb = net.line.at[line, "from_bus"]
+    #             tb = net.line.at[line, "to_bus"]
+
+    #             other_bus = tb if bus == fb else fb
+
+    #             x0, y0 = pos_km[bus]
+    #             x1, y1 = pos_km[other_bus]
+
+    #             plt.plot(
+    #                 [x0, x1], [y0, y1],
+    #                 color="green" if sw.closed and self.line_status.get(line, 1) else "red",
+    #                 linewidth=1.3,
+    #                 linestyle="--",
+    #                 zorder=5
+    #             )
+
+    #         # ---- bus-bus switch ----
+    #         elif sw.et == "b":
+    #             b1 = sw.bus
+    #             b2 = sw.element
+
+    #             x0, y0 = pos_km[b1]
+    #             x1, y1 = pos_km[b2]
+
+    #             plt.plot(
+    #                 [x0, x1], [y0, y1],
+    #                 color="green" if sw.closed else "red",
+    #                 linewidth=1.3,
+    #                 linestyle="--",
+    #                 zorder=5
+    #             )
+                
+    #         # ---- label en el punto medio ----
+    #         xm = 0.5 * (x0 + x1)
+    #         ym = 0.5 * (y0 + y1)
+
+    #         plt.text(
+    #             xm, ym,
+    #             f"S{sw_id}",
+    #             fontsize=7,
+    #             color="black",
+    #             ha="center",
+    #             va="center",
+    #             zorder=6,
+    #             bbox=dict(
+    #                 facecolor="white",
+    #                 edgecolor="none",
+    #                 alpha=0.7,
+    #                 pad=0.8
+    #             )
+    #         )
+                
+    #     # =======================================
+    #     # 5) DIBUJAR TRANSFORMADORES (hv_bus ↔ lv_bus)
+    #     # =======================================
+
+    #     for tid, trafo in net.trafo.iterrows():
+    #         hv = trafo.hv_bus
+    #         lv = trafo.lv_bus
+
+    #         if hv in pos_km and lv in pos_km:
+    #             x0, y0 = pos_km[hv]
+    #             x1, y1 = pos_km[lv]
+
+    #             plt.plot(
+    #                 [x0, x1], [y0, y1],
+    #                 color="blue",
+    #                 linewidth=1.0,
+    #                 linestyle="--",
+    #                 alpha=0.9,
+    #                 zorder=3,
+    #             )
+
+    #             # Opcional: etiqueta del trafo
+    #             mx, my = (x0 + x1) / 2, (y0 + y1) / 2
+    #             plt.text(mx, my + 0.03, f"T{tid}", color="blue", fontsize=7, ha="center")
+
+    #     # =======================================
+    #     # 6) FORMATO + GUARDADO
+    #     # =======================================
+    #     plt.title(f"Red CIGRE - Topología y viento (t = {hour} h)")
+    #     plt.xlabel("Distancia Este–Oeste [km]")
+    #     plt.ylabel("Distancia Norte–Sur [km]")
+    #     plt.gca().set_aspect("equal", adjustable="box")
+    #     plt.grid(alpha=0.3)
+    #     plt.tight_layout()
+
+    #     os.makedirs("figures", exist_ok=True)
+    #     plt.savefig(f"figures/hour_{hour:02d}.png", dpi=200, bbox_inches="tight")
+    #     plt.close()

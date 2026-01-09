@@ -345,8 +345,9 @@ Z = 1 - Z.astype(int)
 
 # Override: line out of service -> 2 (red)
 Z[pivot_line.astype(int) == 0] = 2
-
-Z = Z.values
+Z_df = Z              # DataFrame
+Z_array = Z.to_numpy()
+# Z = Z.values
 
 
 # =========================
@@ -358,7 +359,7 @@ cmap = ListedColormap(["white", "black", "red"])
 norm = BoundaryNorm([-0.5, 0.5, 1.5, 2.5], cmap.N)
 
 im = ax.imshow(
-    Z,
+    Z_array,
     aspect="auto",
     interpolation="nearest",
     cmap=cmap,

@@ -273,9 +273,9 @@ class FailureModel(mosaik_api.Simulator):
         vals = [self.interp2_bilinear(x, y) for x, y in zip(xs, ys)]
         max_v = float(np.max(vals))
 
-        v_th = max(10.0, np.random.normal(v_th_mean, sigma_vth))
-        alpha = max(0.001, np.random.normal(alpha_mean, sigma_alpha))
-        beta = np.clip(np.random.normal(beta_mean, sigma_beta), 1.5, 5.0)
+        v_th = 20
+        beta = 3.0
+        alpha = 0.003  # ajusta
 
         if max_v > v_th:
             P = 1.0 - np.exp(-alpha * (max_v - v_th) ** beta)

@@ -3,6 +3,7 @@ def optimize_switches_ga(
         self_lines,
         self_switches_buses,
         self_transformers,
+        self_loads,
         self_fail_prob,
         prev_switch_state=None,
         population_size=60,
@@ -10,7 +11,8 @@ def optimize_switches_ga(
         crossover_rate=0.8,
         mutation_rate=0.01,   # 🔹 mutación más suave (warm-start)
         lambda_sw = 0,
-        plot=True
+        plot=True,
+        seed=1234
     ):
     """
     Algoritmo genético para optimizar los estados de los switches.
@@ -20,6 +22,8 @@ def optimize_switches_ga(
     import random
     import networkx as nx
     import matplotlib.pyplot as plt
+    
+    rng = random.Random(seed)
 
     # =============================
     # CONJUNTOS
@@ -28,6 +32,15 @@ def optimize_switches_ga(
     switches = list(self_switches_buses.index)
     lines = list(self_lines.index)
     transformers = list(self_transformers.index)
+    loads = list(self_loads.index)
+    
+    # Precalcular la potencia por bus
+    p_load_per_bus = (
+    self_loads
+    .groupby("bus")["p_mw"]
+    .sum()
+    .to_dict()
+)
 
     # Identificar slack
     try:
@@ -64,6 +77,8 @@ def optimize_switches_ga(
     def evaluate_fitness(switch_state, prev_switch_state):
         total_score = 0.0
         total_penalty = 0.0
+        
+        # --- Evaluar sobre todo el horizonte a estudiar ---
         for k, fail_prob_k in self_fail_prob.items():
             
             p_line = {
@@ -146,7 +161,8 @@ def optimize_switches_ga(
 
                 path = nx.shortest_path(H, slack, b)
 
-                p_bus = 1.0
+                p_bus = p_load_per_bus.get(b, 0.0)
+                
                 for u, v in zip(path[:-1], path[1:]):
                     e = H.get_edge_data(u, v)
                     if e["tipo"] == "trafo":
@@ -220,25 +236,25 @@ def optimize_switches_ga(
 
     def mutate(ind):
         # mutación swap con cierta probabilidad
-        if random.random() < 0.3:
+        if rng.random() < 0.3:
             ones = [i for i,v in enumerate(ind) if v==1]
             zeros = [i for i,v in enumerate(ind) if v==0]
             if ones and zeros:
-                i_off = random.choice(ones)
-                i_on  = random.choice(zeros)
+                i_off = rng.choice(ones)
+                i_on  = rng.choice(zeros)
                 ind[i_off] = 0
                 ind[i_on]  = 1
 
         # y además un flip suave
         for i in range(len(ind)):
-            if random.random() < mutation_rate:
+            if rng.random() < mutation_rate:
                 ind[i] = 1 - ind[i]
         return ind
 
     def crossover(p1, p2):
-        if random.random() > crossover_rate:
+        if rng.random() > crossover_rate:
             return p1.copy(), p2.copy()
-        point = random.randint(1, len(p1) - 1)
+        point = rng.randint(1, len(p1) - 1)
         return (
             p1[:point] + p2[point:],
             p2[:point] + p1[point:]
@@ -248,7 +264,7 @@ def optimize_switches_ga(
         best = None
         best_fit = -1e12
         for _ in range(k):
-            i = random.randint(0, len(pop) - 1)
+            i = rng.randint(0, len(pop) - 1)
             if fits[i] > best_fit:
                 best_fit = fits[i]
                 best = pop[i]
@@ -279,7 +295,7 @@ def optimize_switches_ga(
 
     # inmigrantes aleatorios
     def random_individual():
-        return [random.randint(0, 1) for _ in switches]
+        return [rng.randint(0, 1) for _ in switches]
 
     while len(population) < population_size:
         population.append(random_individual())
@@ -309,7 +325,7 @@ def optimize_switches_ga(
         new_pop = [best_global.copy()]
             
         while len(new_pop) < population_size:
-            if random.random() < 0.2:
+            if rng.random() < 0.2:
                 new_pop.append(random_individual())
                 continue
             p1 = tournament_selection(population, fitness)
@@ -324,18 +340,61 @@ def optimize_switches_ga(
     # =============================
     # PLOT
     # =============================
+    # if plot:
+    #     plt.figure(figsize=(8, 5))
+    #     plt.plot(history)
+    #     plt.xlabel("Generación")
+    #     plt.ylabel("Fitness")
+    #     plt.title("Convergencia GA (warm-start)")
+    #     plt.grid(True)
+    #     plt.savefig("figures/GA/convergence.png")
+    #     plt.close()
+    
     if plot:
-        plt.figure(figsize=(8, 5))
-        plt.plot(history)
-        plt.xlabel("Generación")
-        plt.ylabel("Fitness")
-        plt.title("Convergencia GA (warm-start)")
-        plt.grid(True)
-        plt.savefig("figures/GA/convergence.png")
-        plt.close()
+        import os
+        import numpy as np
+        import matplotlib as mpl
+        import matplotlib.pyplot as plt
+
+        os.makedirs("figures/GA", exist_ok=True)
+
+        mpl.rcParams.update({
+            "font.family": "serif",
+            "font.size": 9,
+            "axes.labelsize": 9,
+            "axes.titlesize": 10,
+            "xtick.labelsize": 8,
+            "ytick.labelsize": 8,
+            "axes.linewidth": 0.8,
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+        })
+
+        hist = np.array(history, dtype=float)
+
+        # Best-so-far (monótono) para lectura de convergencia
+        best_so_far = np.maximum.accumulate(hist)
+
+        fig, ax = plt.subplots(figsize=(6.2, 2.8))
+        ax.plot(hist, linewidth=1.0, alpha=0.5, label="Best of generation")
+        ax.plot(best_so_far, linewidth=1.6, label="Best-so-far")
+
+        ax.set_xlabel("Generation")
+        ax.set_ylabel("Fitness")
+        ax.set_title("GA convergence (warm-start)")
+        ax.grid(alpha=0.25)
+
+        ax.legend(frameon=True, framealpha=0.95, fontsize=8, loc="lower right")
+        fig.tight_layout()
+
+        fig.savefig("figures/GA/convergence.pdf", bbox_inches="tight")
+        fig.savefig("figures/GA/convergence.png", dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
 
     return {
         "switch_state": {sid: best_global[i] for i, sid in enumerate(switches)},
         "fitness": best_global_fit,
         "switches_changed": switches_changed
     }
+    
