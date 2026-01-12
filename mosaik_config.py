@@ -7,7 +7,7 @@ SIM_CONFIG = {
     'OpDecisionModel': {'python': 'simuladores.Op_Decision_model:OpDecisionModel'}
 }
 
-FORECAST_HORIZON = 1
+FORECAST_HORIZON = 0
 
 def main():
     world = mosaik.World(SIM_CONFIG)

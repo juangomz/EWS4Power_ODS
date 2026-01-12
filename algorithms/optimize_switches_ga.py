@@ -10,7 +10,9 @@ def optimize_switches_ga(
         generations=60,
         crossover_rate=0.8,
         mutation_rate=0.01,   # 🔹 mutación más suave (warm-start)
-        lambda_sw = 0,
+        lambda_sw_op = 0,
+        lambda_sw_removed=0,
+        lambda_bus_disconnected=0,
         plot=True,
         seed=1234
     ):
@@ -70,16 +72,23 @@ def optimize_switches_ga(
         tb = int(self_transformers.at[tid, "lv_bus"])
         degree[fb] += 1
         degree[tb] += 1
+        
+    if self_fail_prob is None:
+        # Modo reactivo: un único "paso" sin riesgo
+        fail_prob_iter = {0: {}}
+    else:
+        fail_prob_iter = self_fail_prob
 
     # =============================
     # FITNESS
     # =============================
     def evaluate_fitness(switch_state, prev_switch_state):
         total_score = 0.0
-        total_penalty = 0.0
+        total_penalty_b_sin_conectar = 0.0
+        total_penalty_s_removed = 0.0
         
         # --- Evaluar sobre todo el horizonte a estudiar ---
-        for k, fail_prob_k in self_fail_prob.items():
+        for k, fail_prob_k in fail_prob_iter.items():
             
             p_line = {
                 lid: max(1.0 - fail_prob_k.get(lid, 0.0), 1e-6)
@@ -144,10 +153,12 @@ def optimize_switches_ga(
             # =============================
             # Penalizaciones (CLAVE)
             # =============================
-            penalty = 0.0
+            penalty_b_sin_conectar = 0.0
+            penalty_s_removed = 0.0
 
             # nodos no conectados
-            penalty += (len(buses) - len(H.nodes())) + len(removed_sids)
+            penalty_b_sin_conectar += (len(buses) - len(H.nodes()))
+            penalty_s_removed += len(removed_sids)
 
             # =============================
             # Score por terminales
@@ -173,14 +184,15 @@ def optimize_switches_ga(
                 score += p_bus
                 
             total_score += score
-            total_penalty += penalty
+            total_penalty_b_sin_conectar += penalty_b_sin_conectar
+            total_penalty_s_removed += penalty_s_removed
         
         # coste de switching
         switch_cost = sum(
             abs(radial_ind[i] - prev_switch_state[i]) for i in range(len(radial_ind))
         )
 
-        return total_score - total_penalty - lambda_sw*switch_cost, radial_ind, switch_cost
+        return total_score - lambda_bus_disconnected*total_penalty_b_sin_conectar - lambda_sw_removed*total_penalty_s_removed - lambda_sw_op*switch_cost, radial_ind, switch_cost
     
     # =============================
     # DISTANCIA DE HAMMING

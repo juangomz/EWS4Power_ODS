@@ -40,6 +40,7 @@ class OpDecisionModel(mosaik_api.Simulator):
         self.current_repair_plan = {}  # Se envía al grid
         self.switch_plan = {}        # Plan de como ajustar los switches para minimzar ENS
         self.prev_switch_state = {} 
+        self.t = 0
 
         self.lines = None            # DataFrame de líneas (pandapower)
         self.buses = None            # DataFrame de buses
@@ -49,7 +50,7 @@ class OpDecisionModel(mosaik_api.Simulator):
         self.loads = None
         
         self.lambda_sw = 0
-        self.enable_switching = True
+        self.enable_switching = False
         self.records = []               # filas del CSV
         self.switch_records = []        # inicialízalo en __init__
         self.prev_switch_state = None   # estado anterior de switches
@@ -160,7 +161,7 @@ class OpDecisionModel(mosaik_api.Simulator):
         # === Finalizar reparaciones que terminan ahora ===
         to_remove = []
         for lid, finish_time in self.ongoing_repairs.items():
-            if time >= finish_time:
+            if self.t >= finish_time:
                 self.line_status[lid] = 1
                 self.lines.at[lid, "in_service"] = True
                 to_remove.append(lid)
@@ -179,7 +180,7 @@ class OpDecisionModel(mosaik_api.Simulator):
                 if free_crews <= 0:
                     break
 
-                finish = time + self.repair_time - 3600
+                finish = self.t + self.repair_time
                 self.ongoing_repairs[lid] = finish
                 self.failed_lines.discard(lid)   # <- clave: ya está asignada
                 free_crews -= 1
@@ -199,7 +200,7 @@ class OpDecisionModel(mosaik_api.Simulator):
 
         # === Correr optimización de switches ===
         # self.switch_plan = optimize_switches_gurobi(self.buses, self.lines, self.switches_buses, self.transformers, self.fail_prob)
-        
+
         if self.enable_switching:
             result = optimize_switches_ga(
                 self.buses,
@@ -208,7 +209,9 @@ class OpDecisionModel(mosaik_api.Simulator):
                 self.transformers,
                 self.loads,
                 self.fail_prob,
-                lambda_sw=self.lambda_sw
+                lambda_sw_op=self.lambda_sw,
+                lambda_sw_removed=1,
+                lambda_bus_disconnected=1
             )
             self.switch_plan = result["switch_state"]
             best_global_fit = result["fitness"]
@@ -236,7 +239,7 @@ class OpDecisionModel(mosaik_api.Simulator):
 })
         df = pd.DataFrame(self.records)
         df.to_csv(self.csv_path, index=False)
-        
+        self.t += 3600
         return time + 3600  # paso 1 hora
 
     def get_data(self, outputs):

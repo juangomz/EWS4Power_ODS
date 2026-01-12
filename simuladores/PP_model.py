@@ -274,23 +274,7 @@ class PPModel(mosaik_api.Simulator):
         }
 
         return time + 3600
-    
-    # def plot_R_curve(self):
-    #     import matplotlib.pyplot as plt, os
-    #     R = self.current_metrics.get("R_curve", {})
-    #     if not R:
-    #         return
-    #     times = list(R.keys())
-    #     values = [float(v) for v in R.values()]
-    #     os.makedirs("results", exist_ok=True)
-    #     plt.plot(times, values, marker="o")
-    #     plt.title("Curva de Resiliencia R(t)")
-    #     plt.xlabel("Hora")
-    #     plt.ylabel("R(t)")
-    #     plt.grid(alpha=0.4)
-    #     plt.savefig("results/R_curve.png", dpi=200)
-    #     plt.close()
-    #     print("Guardada R_curve en results/R_curve.png")
+
     def plot_R_curve(self):
         import os
         import numpy as np
