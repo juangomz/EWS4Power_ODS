@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import networkx as nx
 from simuladores.logger import Logger
 import json
-from pandapower.networks import create_cigre_network_mv
+import numpy as np
 
 data_dir = './data/red_electrica'
 
@@ -65,17 +65,38 @@ class PPModel(mosaik_api.Simulator):
         super().__init__(META)
         self.eid = 'Grid'
         self.net = pp.create_empty_network()
+        self.rng_sim = np.random.default_rng(2025)
+        
+        # Previous Config.
         self.line_status = {}
+        
+        # Inputs
         self.fail_prob = {}
         self.repair_plan = {}
         self.switch_plan = {}
+        
+        # Results
         self.logger = Logger("results/results.csv")
         self.lines = {}
         self.current_metrics = {}
         self.t = 0
         self.R_curve = {}
         self.switch_records = []
-        self.rng_sim = np.random.default_rng(2025)
+        
+        # MonteCarlo
+        self.M = 30            # nº muestras MC por step (empieza con 20-30)
+        self.alpha = 0.90         # nivel para VaR/CVaR
+        self.mc_stats = []        # guardar P90/CVaR por hora
+        
+        # Plot Net
+        self.enable_plot = False # MUY importante en MC
+        
+        # -----------------------------
+        # Inmunidad post-reparación
+        # -----------------------------
+        self.repair_immunity_s = 2 * 3600   # 2 horas (ajusta)
+        self.immunity_until = {}           # {lid: time_s_hasta_el_que_es_inmune}
+
         
     # =============================================================
     # INITIALIZATION
@@ -112,7 +133,6 @@ class PPModel(mosaik_api.Simulator):
         # ============================
         try:
             self.net = net_cigre15_mv(IN_PATH)
-            # self.net = create_cigre_network_mv(with_der=False)
         except Exception as e:
             print(f"❌ Error cargando red CIGRE: {e}")
             raise e
@@ -199,14 +219,17 @@ class PPModel(mosaik_api.Simulator):
                 
             for sid, state in self.switch_plan.items():
                 self.net.switch.at[int(sid), "closed"] = bool(state)
-            
-            for lid, prob in self.fail_prob.items():
-                if self.line_status.get(lid,1) == 1 and self.rng_sim.random() < prob:
-                    self.line_status[lid] = 0
-                    
+
             for lid, data in self.repair_plan.items():
                 if data.get('finish_time',0) <= self.t * 3600:
                     self.line_status[lid] = 1
+                    self.net.line.at[int(lid), "in_service"] = True
+                    
+                    # Inmunidad
+                    self.immunity_until[lid] = time + self.repair_immunity_s
+                    
+            self.immunity_until = {lid: until for lid, until in self.immunity_until.items() if until > time}
+                    
 
             if 'climate' in vals:
                 gust_speed = list(vals["climate"].values())[0][0]["gust_speed"]
@@ -219,49 +242,101 @@ class PPModel(mosaik_api.Simulator):
             if 'shape' in vals:
                 self.shape = tuple(list(vals['shape'].values())[0])
 
+
+        t = time / 3600.0
+        
+        # MonteCarlo Simulation
+        expected_load = float(self.net.load.p_mw.sum())
+        line_ids = list(self.net.line.index)        
+        
+        # Guardar estado base del step (antes de muestrear)
+        base_in_service = self.net.line["in_service"].copy()
+        base_status = self.line_status.copy()
+        
+        ens_samples = np.empty(self.M, dtype=float)
+        cache_pf = {}  # key(bytes) -> ens_mw
+        
+        for m in range(self.M):
+            # Reset al estado base del step
+            self.net.line["in_service"] = base_in_service
+            self.line_status = base_status.copy()
+
+            for i, lid in enumerate(line_ids):
+                lid = int(lid)
+
+                # si ya estaba caída, permanece caída
+                if base_status.get(lid, 1) == 0:
+                    self.line_status[lid] = 0
+                    continue
+                
+                # Inmunidad
+                if self.immunity_until.get(lid, 0) > time:
+                    self.line_status[lid] = 1
+                    continue
+
+                p = float(self.fail_prob.get(lid, 0.0))
+                self.line_status[lid] = 0 if (self.rng_sim.random() < p) else 1
+
+            # clave compacta: bitstring -> bytes
+            state_vec = np.array(
+                [self.line_status.get(lid, 1) for lid in line_ids],
+                dtype=np.uint8
+            )
+            key = np.packbits(state_vec).tobytes()
+
+            # ===== cache hit =====
+            if key in cache_pf:
+                ens_mw = cache_pf[key]
+                ens_samples[m] = ens_mw
+                served_load = expected_load - ens_mw
+                
+                for i, lid in enumerate(line_ids):
+                    self.net.line.at[int(lid), "in_service"] = bool(self.line_status[lid])
+                
+                continue
+
+            # ===== aplicar estados sampleados =====
+            for i, lid in enumerate(line_ids):
+                self.net.line.at[int(lid), "in_service"] = bool(self.line_status[lid])
+
+            # ===== PF =====
+            try:
+                pp.runpp(self.net)
+                served_load = float(self.net.res_load.p_mw.sum())
+                ens_mw = max(0.0, expected_load - served_load)
+            except Exception:
+                ens_mw = expected_load
+
+            # guardar en cache y en muestras
+            cache_pf[key] = ens_mw
+            ens_samples[m] = ens_mw
+            
         # Actualizar líneas según el modelo de fallo
         for lid, status in self.line_status.items():
             self.net.line.at[lid, 'in_service'] = bool(status)
+            
+        for sw, state in self.switch_plan.items(): 
+                line_id = self.net.switch.at[sw, "element"] 
+                sw_in_service = bool(self.net.line.at[line_id, "in_service"]) 
+                self.switch_records.append({ "time": t, "switch": sw, "state": state, "sw_in_service": sw_in_service })
 
-        t = time / 3600.0
-
-        for sw, state in self.switch_plan.items():
-            line_id = self.net.switch.at[sw, "element"]
-            sw_in_service = bool(self.net.line.at[line_id, "in_service"])
-            self.switch_records.append({
-                "time": t,
-                "switch": sw,
-                "state": state,
-                "sw_in_service": sw_in_service
-            })
-
-        df_switches = pd.DataFrame(self.switch_records)
-        df_switches.to_csv("results/switch_states_GA_PRUEBA.csv", index=False)
+        # VaR (P90) y CVaR0.9
+        p90 = float(np.quantile(ens_samples, self.alpha))
+        tail = ens_samples[ens_samples >= p90]
+        cvar90 = float(tail.mean()) if tail.size else p90
         
-        # Calcular flujo DC
-        try:
-            pp.runpp(self.net)
-            # pp.rundcpp(self.net)
-            print("DC power flow calculado correctamente.")
-            
-            # Calcular ENS topológica
-            expected_load = self.net.load.p_mw.sum()
-            served_load = self.net.res_load.p_mw.sum()
-            R = served_load/expected_load
-            self.R_curve[self.t] = R
-            
-            ens = max(0.0, expected_load - served_load)
-            print(f"Expected: {expected_load:.3f} MW, Served: {served_load:.3f} MW, ENS: {ens:.3f} MW")
-            
-        except Exception as e:
-            ens = self.net.load.p_mw.sum()
-            print(f"Error en rundcpp: {e}")
-            return time + 3600
+        # R-Curve CVaR90
+        R = (expected_load-cvar90)/expected_load
+        # R = served_load/expected_load
+        self.R_curve[self.t] = R
+        ens = max(0.0, expected_load - served_load)   
 
         # Guardar resultados y plot
-        # os.makedirs("results", exist_ok=True)
-        # self.save_results(self.t, wind_speed, ens)
-        self.plot_network(self.t)
+        if self.enable_plot:
+            self.plot_network(self.t)
+        
+        df_switches = pd.DataFrame(self.switch_records)
+        df_switches.to_csv("results/switch_states_GA_PRUEBA.csv", index=False)
         
         if time >= (24 * 3600) - 3600:
             # último paso de simulación
@@ -272,6 +347,18 @@ class PPModel(mosaik_api.Simulator):
             'ens': ens,
             'R_curve': self.R_curve
         }
+        
+        self.mc_stats.append({
+            "t": self.t,
+            "ens_mean": float(ens_samples.mean()),
+            "ens_p50": float(np.quantile(ens_samples, 0.50)),
+            "ens_p90": p90,
+            "ens_cvar90": cvar90,
+            "ens_max": float(ens_samples.max()),
+            "ens_chosen": float(ens),
+        })
+        
+        print(f"[MC-DC] ENS mean={ens_samples.mean():.3f} MW | P90={p90:.3f} MW | CVaR0.9={cvar90:.3f} MW | chosen={ens:.3f} MW")
 
         return time + 3600
 

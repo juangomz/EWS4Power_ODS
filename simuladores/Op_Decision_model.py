@@ -33,12 +33,13 @@ class OpDecisionModel(mosaik_api.Simulator):
         # Estado interno
         self.line_status = {}        # Estado actual de las líneas {lid: 0/1}
         self.fail_prob = {}          # Probabilidad de fallo recibida {lid: p}
-        self.failed_lines = set()    # Líneas caídas acumuladas
         self.repair_time = 3600*2      # Tiempo mínimo para reparar (1h)
         self.resources = 2           # Cuadrillas
         self.ongoing_repairs = {}    # {line_id: finish_time}
         self.current_repair_plan = {}  # Se envía al grid
         self.switch_plan = {}        # Plan de como ajustar los switches para minimzar ENS
+        self.failed_queue = deque()   # cola FIFO de líneas falladas
+        self.failed_set = set()       # para evitar duplicados
         self.prev_switch_state = {} 
         self.t = 0
 
@@ -151,8 +152,10 @@ class OpDecisionModel(mosaik_api.Simulator):
 
         # === Detectar nuevas líneas caídas ===
         for lid, status in self.line_status.items():
-            if status == 0 and lid not in self.ongoing_repairs:
-                self.failed_lines.add(lid)
+            if status == 0 and lid not in self.failed_set and lid not in self.ongoing_repairs:
+                self.failed_queue.append(lid)
+                self.failed_set.add(lid)
+                self.lines.at[lid, "in_service"] = False
                 
         # (De momento solo calculamos el plan, si luego quieres
         #  aplicar el estado de los switches al grid, lo mandarás
@@ -164,26 +167,24 @@ class OpDecisionModel(mosaik_api.Simulator):
             if self.t >= finish_time:
                 self.line_status[lid] = 1
                 self.lines.at[lid, "in_service"] = True
+            if self.t > finish_time:
                 to_remove.append(lid)
 
         for lid in to_remove:
             del self.ongoing_repairs[lid]
-            if lid in self.failed_lines:
-                self.failed_lines.remove(lid)
+            # opcional: por limpieza
+            self.failed_set.discard(lid)
 
         # === Asignar cuadrillas libres a fallos pendientes ===
         free_crews = self.resources - len(self.ongoing_repairs)
 
-        if free_crews > 0:
-            pending = sorted(self.failed_lines - set(self.ongoing_repairs.keys()))
-            for lid in pending:
-                if free_crews <= 0:
-                    break
+        while free_crews > 0 and self.failed_queue:
+            lid = self.failed_queue.popleft()   # FIFO real
+            self.failed_set.remove(lid)
 
-                finish = self.t + self.repair_time
-                self.ongoing_repairs[lid] = finish
-                self.failed_lines.discard(lid)   # <- clave: ya está asignada
-                free_crews -= 1
+            finish = self.t + self.repair_time - 3600 # Resta 3600 porque ocurre en t-1
+            self.ongoing_repairs[lid] = finish
+            free_crews -= 1
 
         # === Generar repair_plan para grid ===
         self.current_repair_plan = {
@@ -195,6 +196,7 @@ class OpDecisionModel(mosaik_api.Simulator):
         for sid in self.switches.index:
             self.switches_buses.at[sid, "bus"] = self.lines.at[self.switches.at[sid,"element"], "from_bus"]
             self.switches_buses.at[sid, "element"] = self.lines.at[self.switches.at[sid,"element"], "to_bus"]
+            
         # === LIMPIAR LINEAS FIJAS QUE SON SWITCHES
         # self.lines = self.lines.drop([12, 13, 14], errors="ignore")
 
@@ -217,7 +219,7 @@ class OpDecisionModel(mosaik_api.Simulator):
             best_global_fit = result["fitness"]
             switches_changed = result["switches_changed"]
         else:
-            # 🔒 Baseline: mantener estado actual de los switches
+            # Baseline: mantener estado actual de los switches
             self.switch_plan = {
                 sid: int(self.switches.at[sid, "closed"])
                 for sid in self.switches.index

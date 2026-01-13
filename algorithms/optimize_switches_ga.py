@@ -123,6 +123,7 @@ def optimize_switches_ga(
 
                 if not bool(self_lines.at[lid, "in_service"]):
                     effective_ind[i] = 0
+                    continue
 
                 # SOLO ahora la arista existe
                 G.add_edge(a, b, tipo="line", lid=lid, sid=sid)
@@ -348,19 +349,6 @@ def optimize_switches_ga(
                 new_pop.append(mutate(h2))
 
         population = new_pop
-
-    # =============================
-    # PLOT
-    # =============================
-    # if plot:
-    #     plt.figure(figsize=(8, 5))
-    #     plt.plot(history)
-    #     plt.xlabel("Generación")
-    #     plt.ylabel("Fitness")
-    #     plt.title("Convergencia GA (warm-start)")
-    #     plt.grid(True)
-    #     plt.savefig("figures/GA/convergence.png")
-    #     plt.close()
     
     if plot:
         import os
