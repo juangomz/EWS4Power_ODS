@@ -1,7 +1,7 @@
 import mosaik_api
 from collections import deque  # para el BFS de downstream
-from algorithms.optimize_switches_gurobi import optimize_switches_gurobi
-from algorithms.optimize_switches_ga import optimize_switches_ga
+from decision_algorithms.optimize_switches_gurobi import optimize_switches_gurobi
+from decision_algorithms.optimize_switches_ga import optimize_switches_ga
 import pandas as pd
 import os
 
@@ -31,15 +31,15 @@ class OpDecisionModel(mosaik_api.Simulator):
         super().__init__(META)
 
         # Estado interno
-        self.line_status = {}        # Estado actual de las líneas {lid: 0/1}
-        self.fail_prob = {}          # Probabilidad de fallo recibida {lid: p}
+        self.line_status = {}          # Estado actual de las líneas {lid: 0/1}
+        self.fail_prob = {}            # Probabilidad de fallo recibida {lid: p}
         self.repair_time = 3600*2      # Tiempo mínimo para reparar (1h)
-        self.resources = 2           # Cuadrillas
-        self.ongoing_repairs = {}    # {line_id: finish_time}
+        self.resources = 2             # Cuadrillas
+        self.ongoing_repairs = {}      # {line_id: finish_time}
         self.current_repair_plan = {}  # Se envía al grid
-        self.switch_plan = {}        # Plan de como ajustar los switches para minimzar ENS
-        self.failed_queue = deque()   # cola FIFO de líneas falladas
-        self.failed_set = set()       # para evitar duplicados
+        self.switch_plan = {}          # Plan de como ajustar los switches para minimzar ENS
+        self.failed_queue = deque()    # cola FIFO de líneas falladas
+        self.failed_set = set()        # para evitar duplicados
         self.prev_switch_state = {} 
         self.t = 0
 
@@ -50,8 +50,13 @@ class OpDecisionModel(mosaik_api.Simulator):
         self.transformers = None
         self.loads = None
         
-        self.lambda_sw = 0
-        self.enable_switching = False
+        # ===== Setting Costs  & Strategy ===== 
+        self.strategy = "proactive"
+        self.lambda_sw_op = 0
+        self.lambda_sw_removed = 1
+        self.lambda_bus_disconected = 1
+        
+        # ===== Saving Data =====
         self.records = []               # filas del CSV
         self.switch_records = []        # inicialízalo en __init__
         self.prev_switch_state = None   # estado anterior de switches
@@ -62,7 +67,10 @@ class OpDecisionModel(mosaik_api.Simulator):
         self.initialized = False     # para calcular downstream una sola vez
 
     def init(self, sid, **sim_params):
-        csv_name = "GA_PRUEBA"
+        if self.strategy != "reactive" and self.strategy != "no_action":
+            csv_name = f"{self.strategy}_Lso{self.lambda_sw_op}_Lsr{self.lambda_sw_removed}_Lbd{self.lambda_bus_disconected}"
+        else:
+            csv_name = f"{self.strategy}"
         os.makedirs("results", exist_ok=True)
         self.csv_path = os.path.join("results", csv_name)
             
@@ -127,7 +135,7 @@ class OpDecisionModel(mosaik_api.Simulator):
     def step(self, time, inputs, max_advance):
         """Recibe fail_prob, line_status_prev, topología y decide reparaciones + switches."""
 
-        # Leer inputs desde otros simuladores
+        # ===== Leer inputs desde otros simuladores =====
         for src, vals in inputs.items():
             if 'fail_prob' in vals:
                 self.fail_prob = list(vals['fail_prob'].values())[0]
@@ -150,60 +158,59 @@ class OpDecisionModel(mosaik_api.Simulator):
             self._compute_downstream_buses()
             self.initialized = True
 
-        # === Detectar nuevas líneas caídas ===
+        # ===== Detectar nuevas líneas caídas =====
         for lid, status in self.line_status.items():
             if status == 0 and lid not in self.failed_set and lid not in self.ongoing_repairs:
                 self.failed_queue.append(lid)
                 self.failed_set.add(lid)
                 self.lines.at[lid, "in_service"] = False
                 
-        # (De momento solo calculamos el plan, si luego quieres
-        #  aplicar el estado de los switches al grid, lo mandarás
-        #  como nueva salida/atributo.)
-
-        # === Finalizar reparaciones que terminan ahora ===
+        # ===== Fin Reparaciones Local para Optimización =====
         to_remove = []
         for lid, finish_time in self.ongoing_repairs.items():
             if self.t >= finish_time:
                 self.line_status[lid] = 1
                 self.lines.at[lid, "in_service"] = True
+                
+            # ===== Eliminar un timestep después para enviarlo a PPModel =====
             if self.t > finish_time:
                 to_remove.append(lid)
 
+        # ===== Eliminar las arregladas de ongoing_repairs =====
         for lid in to_remove:
             del self.ongoing_repairs[lid]
             # opcional: por limpieza
             self.failed_set.discard(lid)
 
-        # === Asignar cuadrillas libres a fallos pendientes ===
+        # ===== Asignar cuadrillas libres a fallos pendientes =====
         free_crews = self.resources - len(self.ongoing_repairs)
 
         while free_crews > 0 and self.failed_queue:
-            lid = self.failed_queue.popleft()   # FIFO real
+            lid = self.failed_queue.popleft()   # FIFO
             self.failed_set.remove(lid)
 
             finish = self.t + self.repair_time - 3600 # Resta 3600 porque ocurre en t-1
             self.ongoing_repairs[lid] = finish
             free_crews -= 1
 
-        # === Generar repair_plan para grid ===
+        # ===== Generar repair_plan para grid =====
         self.current_repair_plan = {
             lid: {'finish_time': finish}
             for lid, finish in self.ongoing_repairs.items()
         }
-                
+        
+        # ===== Generar un dataframe de Switches que relacione buses de ambos extremos =====
         self.switches_buses = self.switches.copy()
         for sid in self.switches.index:
             self.switches_buses.at[sid, "bus"] = self.lines.at[self.switches.at[sid,"element"], "from_bus"]
             self.switches_buses.at[sid, "element"] = self.lines.at[self.switches.at[sid,"element"], "to_bus"]
-            
-        # === LIMPIAR LINEAS FIJAS QUE SON SWITCHES
-        # self.lines = self.lines.drop([12, 13, 14], errors="ignore")
-
-        # === Correr optimización de switches ===
-        # self.switch_plan = optimize_switches_gurobi(self.buses, self.lines, self.switches_buses, self.transformers, self.fail_prob)
-
-        if self.enable_switching:
+    
+        # ===== Optimización de switches =====
+        if self.strategy != "no_action":
+            if self.strategy == "reactive":
+                # ===== Estrategia Recativa solo intenta maximizar Energía Servida Ahora =====
+                self.fail_prob = None
+                
             result = optimize_switches_ga(
                 self.buses,
                 self.lines,
@@ -211,40 +218,50 @@ class OpDecisionModel(mosaik_api.Simulator):
                 self.transformers,
                 self.loads,
                 self.fail_prob,
-                lambda_sw_op=self.lambda_sw,
+                lambda_sw_op=self.lambda_sw_op,
                 lambda_sw_removed=1,
                 lambda_bus_disconnected=1
             )
             self.switch_plan = result["switch_state"]
             best_global_fit = result["fitness"]
             switches_changed = result["switches_changed"]
+            
         else:
             # Baseline: mantener estado actual de los switches
             self.switch_plan = {
                 sid: int(self.switches.at[sid, "closed"])
                 for sid in self.switches.index
             }
-            # métricas coherentes para baseline
+            # Métricas para baseline
             best_global_fit = None
             switches_changed = 0
-                    
-        # result = optimize_switches_ga(self.buses, self.lines, self.switches_buses, self.transformers, self.fail_prob, lambda_sw=self.lambda_sw)        
-        
-        switch_cost = self.lambda_sw * switches_changed
+            
+        switch_cost = self.lambda_sw_op * switches_changed
         total_cost = best_global_fit
 
+        # ===== Guardar Resultados =====
         self.records.append({
             "time": time / 3600.0,
             "total_cost": total_cost,
             "switches_changed": switches_changed,
             "switch_cost": switch_cost,
-})
+        })
         df = pd.DataFrame(self.records)
         df.to_csv(self.csv_path, index=False)
+        
         self.t += 3600
         return time + 3600  # paso 1 hora
 
     def get_data(self, outputs):
+        """
+        Envía a PPModel el plan de reparaciones y reconfiguración de la red
+
+        Returns:
+        
+            self.current_repair_plan: Plan de reparaciones de las lineas
+            self.switch_plan: Plan de reconfiguración de la red
+        
+        """
         return {
             'OpDecisionModel': {
                 'repair_plan': self.current_repair_plan,

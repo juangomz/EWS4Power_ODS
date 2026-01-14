@@ -1,3 +1,11 @@
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+    module=r"simpy(\..*)?"
+)
+
 import mosaik
 
 SIM_CONFIG = {
@@ -13,7 +21,7 @@ def main():
     world = mosaik.World(SIM_CONFIG)
 
     # --- Inicialización de simuladores ---
-    print("⚙️ Iniciando simuladores...")
+    print("Iniciando simuladores...\n")
 
     climate = world.start('ClimateModel', step_size=3600)
     failure = world.start('FailureModel', step_size=3600)
@@ -42,22 +50,22 @@ def main():
     # CONEXIONES ENTRE SIMULADORES
     # ================================================================
 
-    # 🌀 Clima → Fallo
+    # Clima a Fallo
     world.connect(c, f, 'climate', 'grid_x', 'grid_y', 'shape')
     
     # El viento también alimenta al grid directamente
     world.connect(c, g, 'climate', 'grid_x', 'grid_y', 'shape')
 
-    # 🌀 Fallo → Decisión (probabilidades)
+    # Fallo a Decisión (probabilidades)
     world.connect(f, d, 'fail_prob', 'fail_prob')
 
-    # 🌀 Fallo → Red (probabilidades)
+    # Fallo a Red (probabilidades)
     world.connect(f, g, 'fail_prob','fail_prob')
 
-    # 🧩 Decisión → Red (plan de reparación)
+    # Decisión a Red (plan de reparación)
     world.connect(d, g, 'repair_plan', 'switch_plan')
 
-    # 🔁 Red → Decisión (estado actualizado)
+    # Red a Decisión (estado actualizado)
     world.connect(g, d, 'line_status', 'lines', 'buses', 'switches', 'transformers', 'loads', time_shifted=True, initial_data={'line_status':line_status, 'lines':lines, 'buses':buses, 'switches':switches, 'transformers':transformers, 'loads':loads})
     
     # Ejecutar simulación por 24 horas
@@ -66,16 +74,22 @@ def main():
 from pyinstrument import Profiler
 
 if __name__ == "__main__":
+    
     profiler = Profiler(interval=0.001, async_mode="enabled")
     profiler.start()
-    print("🚀 Simulación iniciada (usa Ctrl+C para detener y ver el perfil)...")
+    
+    print("\nSimulación iniciada (usa Ctrl+C para detener y ver el perfil)...\n")
 
     try:
         main()
+        
     except KeyboardInterrupt:
-        print("\n🛑 Simulación interrumpida manualmente.")
+        print("\nSimulación interrumpida manualmente.")
+        
     finally:
         profiler.stop()
+        
         with open("pyinstrument_report.html", "w", encoding="utf-8") as f:
             f.write(profiler.output_html())
-        print("✅ Informe guardado en pyinstrument_report.html")
+            
+        print("Informe guardado en pyinstrument_report.html")
