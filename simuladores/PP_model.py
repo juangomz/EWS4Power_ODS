@@ -4,12 +4,11 @@ import pandas as pd
 import numpy as np
 import csv
 import os
-import matplotlib.pyplot as plt
-import networkx as nx
 from simuladores.logger import Logger
 import json
+import numpy as np
 
-np.random.seed(2025)   # cualquier número fijo
+from plot_fn import plot_network, plot_R_curve
 
 data_dir = './data/red_electrica'
 
@@ -20,7 +19,7 @@ def net_cigre15_mv(IN_PATH):
     return net
 
 def decode_geodata_string(s):
-    """Convierte un string JSON escapado en dict con coordinates."""
+    """Convierte un string JSON en dict con coordenadas."""
     if not isinstance(s, str):
         return None
     try:
@@ -30,7 +29,6 @@ def decode_geodata_string(s):
     except Exception:
         pass
     return None
-
 
 META = {
     'api_version': '3.0',
@@ -53,7 +51,8 @@ META = {
                 'buses',
                 'switches',
                 'transformers',
-                'switch_plan'
+                'loads',
+                'switch_plan',
             ],
         }
     },
@@ -65,33 +64,51 @@ class PPModel(mosaik_api.Simulator):
         super().__init__(META)
         self.eid = 'Grid'
         self.net = pp.create_empty_network()
+        self.rng_sim = np.random.default_rng(2025)
+        
+        # Previous Config.
         self.line_status = {}
+        
+        # Inputs
         self.fail_prob = {}
         self.repair_plan = {}
         self.switch_plan = {}
+        
+        # Results
         self.logger = Logger("results/results.csv")
         self.lines = {}
-        self.current_metrics = {}
         self.t = 0
         self.R_curve = {}
+        self.switch_records = []
+        self.ens_chosen = 0
+        
+        # MonteCarlo
+        self.M = 30               # nº muestras MC por step (empieza con 20-30)
+        self.alpha = 0.90         # nivel para VaR/CVaR
+        self.mc_stats = []        # guardar P90/CVaR por hora
+        
+        # Plot Net
+        self.enable_plot = False  # MUY importante en MC
+        
+        # -----------------------------
+        # Inmunidad post-reparación
+        # -----------------------------
+        self.repair_immunity_s = 2 * 3600   # 2 horas (ajusta)
+        self.immunity_until = {}            # {lid: time_s_hasta_el_que_es_inmune}
+
         
     # =============================================================
     # INITIALIZATION
     # =============================================================
         
     def init(self, sid, **sim_params):
-        print("[PPModel] Inicializando simulador de red...")
         return META
     
     def create(self, num, model):
         """Crea entidad de red y configura topología."""
-        print("📡 Recibido network_data desde mosaik_config.py")
+        
+        print("\nRecibido network_data desde mosaik_config.py")
         self.setup_network()
-
-        self.current_metrics = {
-            'ens': 0.0,
-            'R_curve': self.R_curve
-        }
 
         return [{'eid': self.eid, 'type': model, 'rel': []}]
 
@@ -102,7 +119,7 @@ class PPModel(mosaik_api.Simulator):
     def setup_network(self):
         """Carga la red CIGRE y convierte geodata escapado a coordenadas x,y."""
         
-        print("📁 Cargando red CIGRE desde Excel...")
+        print("Cargando red CIGRE desde Excel...")
         IN_PATH = "./data/red_electrica"
 
         # ============================
@@ -111,15 +128,15 @@ class PPModel(mosaik_api.Simulator):
         try:
             self.net = net_cigre15_mv(IN_PATH)
         except Exception as e:
-            print(f"❌ Error cargando red CIGRE: {e}")
+            print(f"Error cargando red CIGRE: {e}")
             raise e
 
         net = self.net
-        print(f"🔌 Red cargada: {len(net.bus)} buses, {len(net.line)} líneas, {len(net.load)} cargas.")
         
         # ============================================
         # SWITCHES SEGÚN dnr_status
         # ============================================
+        print(f"Switches añadidos a líneas switchables...")
         for lid in net.line.index:
             raw = str(net.line.at[lid, "dnr_status"]).lower()
             status = raw.replace("{", "").replace("}", "").strip()
@@ -134,15 +151,13 @@ class PPModel(mosaik_api.Simulator):
 
             if lid not in net.switch.element.values:
                 pp.create_switch(net, bus=fb, element=lid, et="l", closed=True)
-                print(f"✔ Switches añadidos a línea switchable {lid}: {fb}-{tb}")
+                
             
-            
-
         # ============================
         # 2) Decodificar geodata de buses
         # ============================
         if "geo" in net.bus.columns:
-            print("🛠 Decodificando geodata de buses...")
+            print("Decodificando geodata de buses...")
             for b in net.bus.index:
                 coords = decode_geodata_string(net.bus.at[b, "geo"])
                 if coords:
@@ -155,9 +170,7 @@ class PPModel(mosaik_api.Simulator):
         self.lines = dict(zip(net.line.index, net.line.name))
         self.line_status = {lid: 1 for lid in self.lines.keys()}
 
-        print("✅ setup_network() completado.")
-
-    
+        print("Setup_network() completado.\n")
 
     # ==============================================================
     # SIMULATION STEP
@@ -166,10 +179,9 @@ class PPModel(mosaik_api.Simulator):
     def step(self, time, inputs, max_advance):
         print("\n==============================")
         self.t = int(time / 3600)
-        print(f"⏱️  STEP t = {self.t} h")
+        print(f"STEP t = {self.t} h")
 
         # Read inputs
-        fail_prob = None
         repair_plan = None
         gust_speed = 0
 
@@ -180,7 +192,7 @@ class PPModel(mosaik_api.Simulator):
             if 'fail_prob' in vals:
                 fail_prob_all = list(vals['fail_prob'].values())[0]  # dict {k: {lid: q}}
 
-                # 👉 usar SOLO el presente (k = 0)
+                # Usar SOLO el presente (k = 0)
                 if isinstance(fail_prob_all, dict):
                     self.fail_prob = fail_prob_all.get(0, {})
                 else:
@@ -196,19 +208,21 @@ class PPModel(mosaik_api.Simulator):
                 
             for sid, state in self.switch_plan.items():
                 self.net.switch.at[int(sid), "closed"] = bool(state)
-            
-            for lid, prob in self.fail_prob.items():
-                if self.line_status.get(lid,1) == 1 and np.random.rand() < prob:
-                    self.line_status[lid] = 0
-                    
+
             for lid, data in self.repair_plan.items():
                 if data.get('finish_time',0) <= self.t * 3600:
                     self.line_status[lid] = 1
+                    self.net.line.at[int(lid), "in_service"] = True
+                    
+                    # Inmunidad
+                    self.immunity_until[lid] = time + self.repair_immunity_s
+                    
+            self.immunity_until = {lid: until for lid, until in self.immunity_until.items() if until > time}
+                    
 
             if 'climate' in vals:
                 gust_speed = list(vals["climate"].values())[0][0]["gust_speed"]
                 self.last_gust_speed = np.array(gust_speed)
-
             if 'grid_x' in vals:
                 self.grid_x = np.array(list(vals['grid_x'].values())[0])
             if 'grid_y' in vals:
@@ -216,63 +230,130 @@ class PPModel(mosaik_api.Simulator):
             if 'shape' in vals:
                 self.shape = tuple(list(vals['shape'].values())[0])
 
+
+        t = time / 3600.0
+        
+        # ==============================================================
+        # MONTECARLO
+        # ==============================================================
+        
+        # ===== Inicializar Parámetros =====
+        expected_load = float(self.net.load.p_mw.sum())
+        line_ids = list(self.net.line.index)  
+        ens_samples = np.empty(self.M, dtype=float)
+        cache_pf = {}  # key(bytes) -> ens_mw      
+        
+        # ===== Guardar estado base del step (antes de muestrear) =====
+        base_in_service = self.net.line["in_service"].copy()
+        base_status = self.line_status.copy()
+        
+        # ===== For de Montecarlo =====
+        for m in range(self.M):
+            
+            # ===== Reset al estado base del step =====
+            self.net.line["in_service"] = base_in_service
+            self.line_status = base_status.copy()
+
+            for _, lid in enumerate(line_ids):
+                lid = int(lid)
+
+                # ===== Si ya estaba caída, Permanece caída =====
+                if base_status.get(lid, 1) == 0:
+                    self.line_status[lid] = 0
+                    continue
+                
+                # ===== Inmunidad =====
+                if self.immunity_until.get(lid, 0) > time:
+                    self.line_status[lid] = 1
+                    continue
+                
+                # ===== Romper Linea de Forma Aleatoria =====
+                p = float(self.fail_prob.get(lid, 0.0))
+                self.line_status[lid] = 0 if (self.rng_sim.random() < p) else 1
+
+            # ===== Clave compacta para Cache: bitstring -> bytes =====
+            state_vec = np.array(
+                [self.line_status.get(lid, 1) for lid in line_ids],
+                dtype=np.uint8
+            )
+            key = np.packbits(state_vec).tobytes()
+
+            # ===== Comprobación Misma Config. =====
+            if key in cache_pf:
+                ens_mw = cache_pf[key]
+                ens_samples[m] = ens_mw
+                served_load = expected_load - ens_mw
+                
+                for i, lid in enumerate(line_ids):
+                    self.net.line.at[int(lid), "in_service"] = bool(self.line_status[lid])
+                
+                continue
+
+            # ===== Aplicar Estados Sampleados =====
+            for i, lid in enumerate(line_ids):
+                self.net.line.at[int(lid), "in_service"] = bool(self.line_status[lid])
+
+            # ===== PF =====
+            try:
+                pp.runpp(self.net)
+                served_load = float(self.net.res_load.p_mw.sum())
+                ens_mw = max(0.0, expected_load - served_load)
+            except Exception:
+                ens_mw = expected_load
+
+            # guardar en cache y en muestras
+            cache_pf[key] = ens_mw
+            ens_samples[m] = ens_mw
+            
         # Actualizar líneas según el modelo de fallo
         for lid, status in self.line_status.items():
             self.net.line.at[lid, 'in_service'] = bool(status)
+            
+        for sw, state in self.switch_plan.items(): 
+                line_id = self.net.switch.at[sw, "element"] 
+                sw_in_service = bool(self.net.line.at[line_id, "in_service"]) 
+                self.switch_records.append({ "time": t, "switch": sw, "state": state, "sw_in_service": sw_in_service })
 
-        # Calcular flujo DC
-        try:
-            pp.runpp(self.net)
-            # pp.rundcpp(self.net)
-            print("DC power flow calculado correctamente.")
-            
-            # Calcular ENS topológica
-            expected_load = self.net.load.p_mw.sum()
-            served_load = self.net.res_load.p_mw.sum()
-            R = served_load/expected_load
-            self.R_curve[self.t] = R
-            
-            ens = max(0.0, expected_load - served_load)
-            print(f"Expected: {expected_load:.3f} MW, Served: {served_load:.3f} MW, ENS: {ens:.3f} MW")
-            
-        except Exception as e:
-            ens = self.net.load.p_mw.sum()
-            print(f"Error en rundcpp: {e}")
-            return time + 3600
+        # VaR (P90) y CVaR0.9
+        p90 = float(np.quantile(ens_samples, self.alpha))
+        tail = ens_samples[ens_samples >= p90]
+        cvar90 = float(tail.mean()) if tail.size else p90
+        
+        # R-Curve CVaR90
+        R = (expected_load-cvar90)/expected_load
+        # R = served_load/expected_load
+        self.R_curve[self.t] = R
+        self.ens_chosen = max(0.0, expected_load - served_load)   
 
         # Guardar resultados y plot
-        # os.makedirs("results", exist_ok=True)
-        # self.save_results(self.t, wind_speed, ens)
-        self.plot_network(self.t)
+        if self.enable_plot:
+            plot_network(self.net,
+                         self.last_gust_speed, 
+                         self.grid_x, 
+                         self.grid_y, 
+                         self.line_status, 
+                         self.t)
+        
+        df_switches = pd.DataFrame(self.switch_records)
+        df_switches.to_csv("results/switch_states_GA_PRUEBA.csv", index=False)
         
         if time >= (24 * 3600) - 3600:
             # último paso de simulación
-            self.plot_R_curve()
-
-        # Preparar salida
-        self.current_metrics = {
-            'ens': ens,
-            'R_curve': self.R_curve
-        }
+            plot_R_curve(self.R_curve)
+        
+        self.mc_stats.append({
+            "t": self.t,
+            "ens_mean": float(ens_samples.mean()),
+            "ens_p50": float(np.quantile(ens_samples, 0.50)),
+            "ens_p90": p90,
+            "ens_cvar90": cvar90,
+            "ens_max": float(ens_samples.max()),
+            "ens_chosen": float(self.ens_chosen),
+        })
+        
+        print(f"[MC-DC] ENS mean={ens_samples.mean():.3f} MW | P90={p90:.3f} MW | CVaR0.9={cvar90:.3f} MW | chosen={self.ens_chosen:.3f} MW")
 
         return time + 3600
-    
-    def plot_R_curve(self):
-        import matplotlib.pyplot as plt, os
-        R = self.current_metrics.get("R_curve", {})
-        if not R:
-            return
-        times = list(R.keys())
-        values = [float(v) for v in R.values()]
-        os.makedirs("results", exist_ok=True)
-        plt.plot(times, values, marker="o")
-        plt.title("Curva de Resiliencia R(t)")
-        plt.xlabel("Hora")
-        plt.ylabel("R(t)")
-        plt.grid(alpha=0.4)
-        plt.savefig("results/R_curve.png", dpi=200)
-        plt.close()
-        print("Guardada R_curve en results/R_curve.png")
 
     # ==============================================================
     # UTILIDADES
@@ -295,6 +376,7 @@ class PPModel(mosaik_api.Simulator):
         for i, row in self.net.line.iterrows():
             bus0 = self.net.bus.at[row.from_bus, 'name']
             bus1 = self.net.bus.at[row.to_bus, 'name']
+            
             # Leer geodata de forma segura. Pandapower guarda la tupla en la columna 'geodata'.
             def _get_geodata(idx):
                 """
@@ -320,211 +402,13 @@ class PPModel(mosaik_api.Simulator):
 
         return {
             self.eid: {
-                'ens': self.current_metrics.get('ens', 0.0),
+                'ens': self.ens_chosen,
                 'line_positions': line_pos,
                 'line_status': self.line_status,
                 'lines': self.net.line,
                 'buses': self.net.bus,
                 'switches': self.net.switch,
                 'transformers': self.net.trafo,
+                'loads': self.net.load,
             }
         }
-
-    def plot_network(self, hour):
-        import matplotlib.pyplot as plt
-        import networkx as nx
-        import numpy as np
-        import pandapower.topology as top
-        import os
-
-        plt.figure(figsize=(8, 6))
-        net = self.net
-
-        # =======================================
-        #  GRAFO REAL (respeta switches)
-        # =======================================
-        G = top.create_nxgraph(net, respect_switches=True, include_out_of_service=False)
-
-        # =======================================
-        # POSICIONES (convertir a km y centrar)
-        # =======================================
-        FT_TO_KM = 0.0003048
-        pos_km = {
-            bus: (float(net.bus.at[bus, "x"]) * FT_TO_KM,
-                float(net.bus.at[bus, "y"]) * FT_TO_KM)
-            for bus in net.bus.index
-        }
-
-        # Centrado
-        xs = [p[0] for p in pos_km.values()]
-        ys = [p[1] for p in pos_km.values()]
-        x_mean, y_mean = np.mean(xs), np.mean(ys)
-        pos_km = {b: (pos_km[b][0] - x_mean, pos_km[b][1] - y_mean) for b in pos_km}
-
-        # =======================================
-        # 1) DIBUJAR VIENTO
-        # =======================================
-        if hasattr(self, "last_gust_speed") and isinstance(self.last_gust_speed, np.ndarray):
-            if hasattr(self, "grid_x") and hasattr(self, "grid_y"):
-                X, Y = np.meshgrid(self.grid_x, self.grid_y)
-                plt.imshow(
-                    self.last_gust_speed,
-                    origin="lower",
-                    cmap="coolwarm",
-                    alpha=0.5,
-                    extent=[X.min(), X.max(), Y.min(), Y.max()],
-                    vmin=0, vmax=30
-                )
-                plt.colorbar(label="Velocidad del viento [m/s]", shrink=0.7)
-
-        # =======================================
-        # 2) BUSES ENERGIZADOS (topología real)
-        # =======================================
-        slack_bus = int(net.ext_grid.bus.values[0])
-        energized = set(nx.node_connected_component(G, slack_bus)) if slack_bus in G else set()
-
-        nodes = list(G.nodes())
-        pos_filtered = {n: pos_km[n] for n in nodes}
-
-        node_colors = []
-        node_sizes = []
-
-        for b in nodes:
-            if b == slack_bus:
-                node_colors.append("limegreen")
-                node_sizes.append(20)
-            elif b in energized:
-                node_colors.append("green")
-                node_sizes.append(10)
-            else:
-                node_colors.append("red")
-                node_sizes.append(10)
-
-        nx.draw_networkx_nodes(
-            G,
-            pos_filtered,
-            nodelist=nodes,
-            node_color=node_colors,
-            node_size=node_sizes,
-            edgecolors="black"
-        )
-        
-        # =======================================
-        # DIBUJAR NOMBRES DE LOS NODOS
-        # =======================================
-        for bus_idx in nodes:
-            x, y = pos_filtered[bus_idx]
-            label = str(net.bus.at[bus_idx, "name"])
-            
-            plt.text(
-                x, y + 0.03,          # pequeño desplazamiento vertical
-                label,
-                fontsize=7,
-                ha="center",
-                va="bottom"
-            )
-
-        # =======================================
-        # 3) DIBUJAR LÍNEAS NO SWITCHABLES
-        # =======================================
-        switchable_lines = set(net.switch[net.switch.et == "l"].element.values)
-
-        for lid in net.line.index:
-            if lid in switchable_lines:
-                continue  # ❌ NO dibujar líneas conmutables
-
-            fb = net.line.at[lid, "from_bus"]
-            tb = net.line.at[lid, "to_bus"]
-
-            if fb in pos_km and tb in pos_km:
-                x0, y0 = pos_km[fb]
-                x1, y1 = pos_km[tb]
-
-                plt.plot(
-                    [x0, x1], [y0, y1],
-                    color="green" if self.line_status.get(lid, 1) == 1 else "red",
-                    linestyle="-",
-                    linewidth=0.8,
-                    alpha=0.8,
-                )
-
-        # =======================================
-        # 4) DIBUJAR SWITCHES
-        # =======================================
-        for _, sw in net.switch.iterrows():
-
-            # ---- bus-line switch ----
-            if sw.et == "l":
-                line = sw.element
-                bus = sw.bus
-
-                fb = net.line.at[line, "from_bus"]
-                tb = net.line.at[line, "to_bus"]
-
-                other_bus = tb if bus == fb else fb
-
-                x0, y0 = pos_km[bus]
-                x1, y1 = pos_km[other_bus]
-
-                plt.plot(
-                    [x0, x1], [y0, y1],
-                    color="green" if sw.closed and self.line_status.get(line, 1) else "red",
-                    linewidth=1.3,
-                    linestyle="--",
-                    zorder=5
-                )
-
-            # ---- bus-bus switch ----
-            elif sw.et == "b":
-                b1 = sw.bus
-                b2 = sw.element
-
-                x0, y0 = pos_km[b1]
-                x1, y1 = pos_km[b2]
-
-                plt.plot(
-                    [x0, x1], [y0, y1],
-                    color="green" if sw.closed else "red",
-                    linewidth=1.3,
-                    linestyle="--",
-                    zorder=5
-                )
-                
-        # =======================================
-        # 5) DIBUJAR TRANSFORMADORES (hv_bus ↔ lv_bus)
-        # =======================================
-
-        for tid, trafo in net.trafo.iterrows():
-            hv = trafo.hv_bus
-            lv = trafo.lv_bus
-
-            if hv in pos_km and lv in pos_km:
-                x0, y0 = pos_km[hv]
-                x1, y1 = pos_km[lv]
-
-                plt.plot(
-                    [x0, x1], [y0, y1],
-                    color="blue",
-                    linewidth=1.0,
-                    linestyle="--",
-                    alpha=0.9,
-                    zorder=3,
-                )
-
-                # Opcional: etiqueta del trafo
-                mx, my = (x0 + x1) / 2, (y0 + y1) / 2
-                plt.text(mx, my + 0.03, f"T{tid}", color="blue", fontsize=7, ha="center")
-
-        # =======================================
-        # 6) FORMATO + GUARDADO
-        # =======================================
-        plt.title(f"Red CIGRE - Topología y viento (t = {hour} h)")
-        plt.xlabel("Distancia Este–Oeste [km]")
-        plt.ylabel("Distancia Norte–Sur [km]")
-        plt.gca().set_aspect("equal", adjustable="box")
-        plt.grid(alpha=0.3)
-        plt.tight_layout()
-
-        os.makedirs("figures", exist_ok=True)
-        plt.savefig(f"figures/hour_{hour:02d}.png", dpi=200, bbox_inches="tight")
-        plt.close()
