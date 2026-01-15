@@ -1,3 +1,6 @@
+import networkx as nx
+import random
+
 def optimize_switches_ga(
         self_buses,
         self_lines,
@@ -20,10 +23,6 @@ def optimize_switches_ga(
     Algoritmo genético para optimizar los estados de los switches.
     Warm-start desde la topología previa almacenada en self_switches_buses.
     """
-
-    import random
-    import networkx as nx
-    import matplotlib.pyplot as plt
     
     rng = random.Random(seed)
 
@@ -78,6 +77,24 @@ def optimize_switches_ga(
         fail_prob_iter = {0: {}}
     else:
         fail_prob_iter = self_fail_prob
+        
+    G = nx.Graph()
+    for b in buses:
+        G.add_node(b)
+
+    # Líneas
+    line_map = {}
+    for lid in lines:
+        fb = int(self_lines.at[lid, "from_bus"])
+        tb = int(self_lines.at[lid, "to_bus"])
+        line_map[(fb, tb)] = lid
+        line_map[(tb, fb)] = lid  # importante
+
+    # Transformadores
+    for tid in transformers:
+        fb = int(self_transformers.at[tid, "hv_bus"])
+        tb = int(self_transformers.at[tid, "lv_bus"])
+        G.add_edge(fb, tb, tipo="trafo", tid=tid)
 
     # =============================
     # FITNESS
@@ -94,18 +111,6 @@ def optimize_switches_ga(
                 lid: max(1.0 - fail_prob_k.get(lid, 0.0), 1e-6)
                 for lid in lines
             }
-            
-            G = nx.Graph()
-            for b in buses:
-                G.add_node(b)
-
-            # Líneas
-            line_map = {}
-            for lid in lines:
-                fb = int(self_lines.at[lid, "from_bus"])
-                tb = int(self_lines.at[lid, "to_bus"])
-                line_map[(fb, tb)] = lid
-                line_map[(tb, fb)] = lid  # importante
 
             # Switches
             effective_ind = switch_state.copy()
@@ -130,12 +135,6 @@ def optimize_switches_ga(
                 
             sid_index = {sid: i for i, sid in enumerate(switches)}
 
-            # Transformadores
-            for tid in transformers:
-                fb = int(self_transformers.at[tid, "hv_bus"])
-                tb = int(self_transformers.at[tid, "lv_bus"])
-                G.add_edge(fb, tb, tipo="trafo", tid=tid)
-
             # Componente slack
             if slack not in G:
                 return -1e3
@@ -143,10 +142,10 @@ def optimize_switches_ga(
             comp = nx.node_connected_component(G, slack)
             H = G.subgraph(comp).copy()
 
-            # 🔧 Reparar topología: romper ciclos antes de evaluar        
+            # Reparar topología: romper ciclos antes de evaluar        
             H, removed_sids = repair_to_radial(H, p_line)
             
-            # 🔧 crear cromosoma reparado
+            # crear cromosoma reparado
             radial_ind = effective_ind.copy()
             for sid in removed_sids:
                 radial_ind[sid_index[sid]] = 0
@@ -206,7 +205,7 @@ def optimize_switches_ga(
     # ASEGUTRADOR DE RADIALIDAD
     # =============================
     def repair_to_radial(H, p_line):
-        import networkx as nx
+        
 
         H = H.copy()
         removed_sids = set()

@@ -7,6 +7,7 @@ warnings.filterwarnings(
 )
 
 import mosaik
+from pyinstrument import Profiler
 
 SIM_CONFIG = {
     'ClimateModel': {'python': 'simuladores.Climate_model:ClimateModel'},
@@ -66,12 +67,20 @@ def main():
     world.connect(d, g, 'repair_plan', 'switch_plan')
 
     # Red a Decisión (estado actualizado)
-    world.connect(g, d, 'line_status', 'lines', 'buses', 'switches', 'transformers', 'loads', time_shifted=True, initial_data={'line_status':line_status, 'lines':lines, 'buses':buses, 'switches':switches, 'transformers':transformers, 'loads':loads})
+    world.connect(g, d,
+                  'line_status',
+                  'lines', 'buses',
+                  'switches', 'transformers', 'loads',
+                  time_shifted=True,
+                  initial_data={'line_status':line_status,
+                                'lines':lines, 'buses':buses,
+                                'switches':switches,
+                                'transformers':transformers,
+                                'loads':loads}
+                  )
     
     # Ejecutar simulación por 24 horas
     world.run(until=24 * 3600)
-
-from pyinstrument import Profiler
 
 if __name__ == "__main__":
     

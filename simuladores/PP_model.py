@@ -136,7 +136,7 @@ class PPModel(mosaik_api.Simulator):
         # ============================================
         # SWITCHES SEGÚN dnr_status
         # ============================================
-        print(f"Switches añadidos a líneas switchables...")
+        print(f"Switches añadidos a líneas switcheables...")
         for lid in net.line.index:
             raw = str(net.line.at[lid, "dnr_status"]).lower()
             status = raw.replace("{", "").replace("}", "").strip()
@@ -152,7 +152,6 @@ class PPModel(mosaik_api.Simulator):
             if lid not in net.switch.element.values:
                 pp.create_switch(net, bus=fb, element=lid, et="l", closed=True)
                 
-            
         # ============================
         # 2) Decodificar geodata de buses
         # ============================
