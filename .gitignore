@@ -14,8 +14,6 @@ tfm_env/
 *.egg-info/
 
 # === Datos y simulaciones ===
-data/
-*.csv
 *.nc
 *.h5
 *.zip
